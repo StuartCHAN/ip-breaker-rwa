@@ -1,66 +1,9 @@
-## Foundry
+## IP Breaker RWA
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+** Evidence-Backed IP Passport & Programmable Licensing Protocol **
 
-Foundry consists of:
+IP Breaker RWA helps founders and builders make intellectual property assets verifiable before making them tokenized.
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+Most RWA projects focus on token issuance, but IP assets require a trusted evidence layer first: ownership claims, public records, technical documents, search reports, FTO reports, risk reviews, and license terms.
 
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
-```
-
-### Test
-
-```shell
-$ forge test
-```
-
-### Format
-
-```shell
-$ forge fmt
-```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+This project provides a Solidity-based MVP for registering IP assets, attaching evidence, and issuing onchain license certificates without selling fractional ownership or investment interests.
