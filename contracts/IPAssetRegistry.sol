@@ -73,14 +73,7 @@ contract IPAssetRegistry is ERC721, Ownable, IIPAssetRegistry {
             createdAt: block.timestamp
         });
 
-        emit IPAssetRegistered(
-            assetId,
-            msg.sender,
-            title,
-            assetType,
-            documentHash,
-            metadataURI
-        );
+        emit IPAssetRegistered(assetId, msg.sender, title, assetType, documentHash, metadataURI);
 
         _safeMint(msg.sender, assetId);
     }
@@ -95,21 +88,14 @@ contract IPAssetRegistry is ERC721, Ownable, IIPAssetRegistry {
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         if (!exists(tokenId)) revert AssetDoesNotExist(tokenId);
         return _assets[tokenId].metadataURI;
-    } 
-
+    }
 
     ///这里debugged过了：里面 ERC721 已经有一个 ownerOf(uint256)，而 IIPAssetRegistry 也声明了一个同名 ownerOf(uint256)。Solidity 要求我们显式 override 一下。
     /// @notice Returns the owner of an IP Asset NFT.
     /// @dev Explicit override required because both ERC721 and IIPAssetRegistry define ownerOf.
-    function ownerOf(uint256 tokenId)
-        public
-        view
-        override(ERC721, IIPAssetRegistry)
-        returns (address)
-    {
+    function ownerOf(uint256 tokenId) public view override(ERC721, IIPAssetRegistry) returns (address) {
         return super.ownerOf(tokenId);
-    }   
-
+    }
 
     /// @notice Checks whether an IP Asset NFT has been minted.
     function exists(uint256 assetId) public view returns (bool) {
