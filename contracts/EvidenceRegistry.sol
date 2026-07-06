@@ -104,15 +104,7 @@ contract EvidenceRegistry is Ownable {
 
         _assetEvidenceIds[assetId].push(evidenceId);
 
-        emit EvidenceAdded(
-            assetId,
-            evidenceId,
-            msg.sender,
-            evidenceType,
-            evidenceHash,
-            evidenceURI,
-            attestationUID
-        );
+        emit EvidenceAdded(assetId, evidenceId, msg.sender, evidenceType, evidenceHash, evidenceURI, attestationUID);
     }
 
     /// @notice Returns one evidence record by ID.
@@ -143,7 +135,6 @@ contract EvidenceRegistry is Ownable {
     function _isReviewerEvidence(string memory evidenceType) internal pure returns (bool) {
         bytes32 evidenceTypeHash = keccak256(bytes(evidenceType));
 
-        return evidenceTypeHash == FTO_REPORT_TYPEHASH
-            || evidenceTypeHash == RISK_REPORT_TYPEHASH;
+        return evidenceTypeHash == FTO_REPORT_TYPEHASH || evidenceTypeHash == RISK_REPORT_TYPEHASH;
     }
-} 
+}

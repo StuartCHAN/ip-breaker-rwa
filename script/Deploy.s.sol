@@ -12,11 +12,7 @@ import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
 contract Deploy is Script {
     function run()
         external
-        returns (
-            IPAssetRegistry assetRegistry,
-            EvidenceRegistry evidenceRegistry,
-            LicenseEscrow licenseEscrow
-        )
+        returns (IPAssetRegistry assetRegistry, EvidenceRegistry evidenceRegistry, LicenseEscrow licenseEscrow)
     {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
 
@@ -34,4 +30,4 @@ contract Deploy is Script {
         console2.log("LicenseEscrow:", address(licenseEscrow));
         console2.log("Deployer / Admin:", vm.addr(deployerPrivateKey));
     }
-} 
+}

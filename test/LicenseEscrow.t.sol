@@ -19,13 +19,11 @@ contract LicenseEscrowTest is Test {
     string private constant JURISDICTION = "US / CN";
     string private constant METADATA_URI = "ipfs://metadata-ai-patent-assistant";
 
-    bytes32 private constant DOCUMENT_HASH =
-        keccak256("AI Patent Drafting Assistant technical whitepaper v1");
+    bytes32 private constant DOCUMENT_HASH = keccak256("AI Patent Drafting Assistant technical whitepaper v1");
 
     uint256 private constant LICENSE_PRICE = 0.01 ether;
     uint64 private constant LICENSE_DURATION = 365 days;
-    bytes32 private constant TERMS_HASH =
-        keccak256("commercial internal use, no resale, no sublicensing");
+    bytes32 private constant TERMS_HASH = keccak256("commercial internal use, no resale, no sublicensing");
     string private constant TERMS_URI = "ipfs://license-terms-commercial-internal-use";
 
     event LicenseOfferCreated(
@@ -39,10 +37,7 @@ contract LicenseEscrowTest is Test {
         bool transferable
     );
 
-    event LicenseOfferStatusUpdated(
-        uint256 indexed offerId,
-        bool active
-    );
+    event LicenseOfferStatusUpdated(uint256 indexed offerId, bool active);
 
     event LicensePurchased(
         uint256 indexed offerId,
@@ -76,14 +71,8 @@ contract LicenseEscrowTest is Test {
         uint256 assetId = _registerDefaultAsset(alice);
 
         vm.prank(alice);
-        uint256 offerId = licenseEscrow.createLicenseOffer(
-            assetId,
-            LICENSE_PRICE,
-            LICENSE_DURATION,
-            TERMS_HASH,
-            TERMS_URI,
-            false
-        );
+        uint256 offerId =
+            licenseEscrow.createLicenseOffer(assetId, LICENSE_PRICE, LICENSE_DURATION, TERMS_HASH, TERMS_URI, false);
 
         assertEq(offerId, 1);
 
@@ -104,69 +93,28 @@ contract LicenseEscrowTest is Test {
         uint256 assetId = _registerDefaultAsset(alice);
 
         vm.expectEmit(true, true, true, true, address(licenseEscrow));
-        emit LicenseOfferCreated(
-            1,
-            assetId,
-            alice,
-            LICENSE_PRICE,
-            LICENSE_DURATION,
-            TERMS_HASH,
-            TERMS_URI,
-            false
-        );
+        emit LicenseOfferCreated(1, assetId, alice, LICENSE_PRICE, LICENSE_DURATION, TERMS_HASH, TERMS_URI, false);
 
         vm.prank(alice);
-        licenseEscrow.createLicenseOffer(
-            assetId,
-            LICENSE_PRICE,
-            LICENSE_DURATION,
-            TERMS_HASH,
-            TERMS_URI,
-            false
-        );
+        licenseEscrow.createLicenseOffer(assetId, LICENSE_PRICE, LICENSE_DURATION, TERMS_HASH, TERMS_URI, false);
     }
 
     function testCreateLicenseOfferRevertsWhenAssetDoesNotExist() public {
         uint256 missingAssetId = 999;
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.AssetDoesNotExist.selector,
-                missingAssetId
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.AssetDoesNotExist.selector, missingAssetId));
 
         vm.prank(alice);
-        licenseEscrow.createLicenseOffer(
-            missingAssetId,
-            LICENSE_PRICE,
-            LICENSE_DURATION,
-            TERMS_HASH,
-            TERMS_URI,
-            false
-        );
+        licenseEscrow.createLicenseOffer(missingAssetId, LICENSE_PRICE, LICENSE_DURATION, TERMS_HASH, TERMS_URI, false);
     }
 
     function testCreateLicenseOfferRevertsWhenCallerIsNotAssetOwner() public {
         uint256 assetId = _registerDefaultAsset(alice);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.NotAssetOwner.selector,
-                assetId,
-                bob
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotAssetOwner.selector, assetId, bob));
 
         vm.prank(bob);
-        licenseEscrow.createLicenseOffer(
-            assetId,
-            LICENSE_PRICE,
-            LICENSE_DURATION,
-            TERMS_HASH,
-            TERMS_URI,
-            false
-        );
+        licenseEscrow.createLicenseOffer(assetId, LICENSE_PRICE, LICENSE_DURATION, TERMS_HASH, TERMS_URI, false);
     }
 
     function testCreateLicenseOfferRevertsWhenPriceIsZero() public {
@@ -175,14 +123,7 @@ contract LicenseEscrowTest is Test {
         vm.expectRevert(LicenseEscrow.InvalidPrice.selector);
 
         vm.prank(alice);
-        licenseEscrow.createLicenseOffer(
-            assetId,
-            0,
-            LICENSE_DURATION,
-            TERMS_HASH,
-            TERMS_URI,
-            false
-        );
+        licenseEscrow.createLicenseOffer(assetId, 0, LICENSE_DURATION, TERMS_HASH, TERMS_URI, false);
     }
 
     function testCreateLicenseOfferRevertsWhenDurationIsZero() public {
@@ -191,14 +132,7 @@ contract LicenseEscrowTest is Test {
         vm.expectRevert(LicenseEscrow.InvalidDuration.selector);
 
         vm.prank(alice);
-        licenseEscrow.createLicenseOffer(
-            assetId,
-            LICENSE_PRICE,
-            0,
-            TERMS_HASH,
-            TERMS_URI,
-            false
-        );
+        licenseEscrow.createLicenseOffer(assetId, LICENSE_PRICE, 0, TERMS_HASH, TERMS_URI, false);
     }
 
     function testCreateLicenseOfferRevertsWhenTermsHashIsZero() public {
@@ -207,14 +141,7 @@ contract LicenseEscrowTest is Test {
         vm.expectRevert(LicenseEscrow.ZeroTermsHash.selector);
 
         vm.prank(alice);
-        licenseEscrow.createLicenseOffer(
-            assetId,
-            LICENSE_PRICE,
-            LICENSE_DURATION,
-            bytes32(0),
-            TERMS_URI,
-            false
-        );
+        licenseEscrow.createLicenseOffer(assetId, LICENSE_PRICE, LICENSE_DURATION, bytes32(0), TERMS_URI, false);
     }
 
     function testCreateLicenseOfferRevertsWhenTermsURIIsEmpty() public {
@@ -223,14 +150,7 @@ contract LicenseEscrowTest is Test {
         vm.expectRevert(LicenseEscrow.EmptyTermsURI.selector);
 
         vm.prank(alice);
-        licenseEscrow.createLicenseOffer(
-            assetId,
-            LICENSE_PRICE,
-            LICENSE_DURATION,
-            TERMS_HASH,
-            "",
-            false
-        );
+        licenseEscrow.createLicenseOffer(assetId, LICENSE_PRICE, LICENSE_DURATION, TERMS_HASH, "", false);
     }
 
     function testLicensorCanDeactivateOffer() public {
@@ -251,13 +171,7 @@ contract LicenseEscrowTest is Test {
         uint256 assetId = _registerDefaultAsset(alice);
         uint256 offerId = _createDefaultOffer(alice, assetId, false);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.NotOfferLicensor.selector,
-                offerId,
-                bob
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotOfferLicensor.selector, offerId, bob));
 
         vm.prank(bob);
         licenseEscrow.setLicenseOfferActive(offerId, false);
@@ -266,12 +180,7 @@ contract LicenseEscrowTest is Test {
     function testSetOfferStatusRevertsWhenOfferDoesNotExist() public {
         uint256 missingOfferId = 999;
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.OfferDoesNotExist.selector,
-                missingOfferId
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.OfferDoesNotExist.selector, missingOfferId));
 
         vm.prank(alice);
         licenseEscrow.setLicenseOfferActive(missingOfferId, false);
@@ -285,14 +194,7 @@ contract LicenseEscrowTest is Test {
 
         vm.expectEmit(true, true, true, true, address(licenseEscrow));
         emit LicensePurchased(
-            offerId,
-            1,
-            assetId,
-            bob,
-            alice,
-            LICENSE_PRICE,
-            block.timestamp,
-            block.timestamp + LICENSE_DURATION
+            offerId, 1, assetId, bob, alice, LICENSE_PRICE, block.timestamp, block.timestamp + LICENSE_DURATION
         );
 
         vm.prank(bob);
@@ -335,12 +237,7 @@ contract LicenseEscrowTest is Test {
     function testBuyLicenseRevertsWhenOfferDoesNotExist() public {
         uint256 missingOfferId = 999;
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.OfferDoesNotExist.selector,
-                missingOfferId
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.OfferDoesNotExist.selector, missingOfferId));
 
         vm.prank(bob);
         licenseEscrow.buyLicense{value: LICENSE_PRICE}(missingOfferId);
@@ -353,12 +250,7 @@ contract LicenseEscrowTest is Test {
         vm.prank(alice);
         licenseEscrow.setLicenseOfferActive(offerId, false);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.OfferNotActive.selector,
-                offerId
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.OfferNotActive.selector, offerId));
 
         vm.prank(bob);
         licenseEscrow.buyLicense{value: LICENSE_PRICE}(offerId);
@@ -382,13 +274,7 @@ contract LicenseEscrowTest is Test {
 
         uint256 wrongPayment = LICENSE_PRICE - 1;
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.IncorrectPayment.selector,
-                LICENSE_PRICE,
-                wrongPayment
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.IncorrectPayment.selector, LICENSE_PRICE, wrongPayment));
 
         vm.prank(bob);
         licenseEscrow.buyLicense{value: wrongPayment}(offerId);
@@ -400,13 +286,7 @@ contract LicenseEscrowTest is Test {
 
         uint256 wrongPayment = LICENSE_PRICE + 1;
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.IncorrectPayment.selector,
-                LICENSE_PRICE,
-                wrongPayment
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.IncorrectPayment.selector, LICENSE_PRICE, wrongPayment));
 
         vm.prank(bob);
         licenseEscrow.buyLicense{value: wrongPayment}(offerId);
@@ -419,13 +299,7 @@ contract LicenseEscrowTest is Test {
         vm.prank(alice);
         assetRegistry.transferFrom(alice, carol, assetId);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.LicensorNoLongerAssetOwner.selector,
-                assetId,
-                alice
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.LicensorNoLongerAssetOwner.selector, assetId, alice));
 
         vm.prank(bob);
         licenseEscrow.buyLicense{value: LICENSE_PRICE}(offerId);
@@ -438,12 +312,7 @@ contract LicenseEscrowTest is Test {
         vm.prank(bob);
         uint256 licenseId = licenseEscrow.buyLicense{value: LICENSE_PRICE}(offerId);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.NonTransferableLicense.selector,
-                licenseId
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NonTransferableLicense.selector, licenseId));
 
         vm.prank(bob);
         licenseEscrow.transferFrom(bob, carol, licenseId);
@@ -479,12 +348,7 @@ contract LicenseEscrowTest is Test {
     function testTokenURIRevertsWhenLicenseDoesNotExist() public {
         uint256 missingLicenseId = 999;
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.LicenseDoesNotExist.selector,
-                missingLicenseId
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.LicenseDoesNotExist.selector, missingLicenseId));
 
         licenseEscrow.tokenURI(missingLicenseId);
     }
@@ -492,12 +356,7 @@ contract LicenseEscrowTest is Test {
     function testGetLicenseRevertsWhenLicenseDoesNotExist() public {
         uint256 missingLicenseId = 999;
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LicenseEscrow.LicenseDoesNotExist.selector,
-                missingLicenseId
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.LicenseDoesNotExist.selector, missingLicenseId));
 
         licenseEscrow.getLicense(missingLicenseId);
     }
@@ -551,28 +410,16 @@ contract LicenseEscrowTest is Test {
 
     function _registerDefaultAsset(address registrant) private returns (uint256 assetId) {
         vm.prank(registrant);
-        assetId = assetRegistry.registerAsset(
-            TITLE,
-            ASSET_TYPE,
-            JURISDICTION,
-            DOCUMENT_HASH,
-            METADATA_URI
-        );
+        assetId = assetRegistry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
     }
 
-    function _createDefaultOffer(
-        address licensor,
-        uint256 assetId,
-        bool transferable
-    ) private returns (uint256 offerId) {
+    function _createDefaultOffer(address licensor, uint256 assetId, bool transferable)
+        private
+        returns (uint256 offerId)
+    {
         vm.prank(licensor);
         offerId = licenseEscrow.createLicenseOffer(
-            assetId,
-            LICENSE_PRICE,
-            LICENSE_DURATION,
-            TERMS_HASH,
-            TERMS_URI,
-            transferable
+            assetId, LICENSE_PRICE, LICENSE_DURATION, TERMS_HASH, TERMS_URI, transferable
         );
     }
-} 
+}

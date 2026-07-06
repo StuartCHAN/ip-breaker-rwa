@@ -63,10 +63,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         bool transferable
     );
 
-    event LicenseOfferStatusUpdated(
-        uint256 indexed offerId,
-        bool active
-    );
+    event LicenseOfferStatusUpdated(uint256 indexed offerId, bool active);
 
     event LicensePurchased(
         uint256 indexed offerId,
@@ -126,16 +123,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
             createdAt: block.timestamp
         });
 
-        emit LicenseOfferCreated(
-            offerId,
-            assetId,
-            msg.sender,
-            price,
-            duration,
-            termsHash,
-            termsURI,
-            transferable
-        );
+        emit LicenseOfferCreated(offerId, assetId, msg.sender, price, duration, termsHash, termsURI, transferable);
     }
 
     /// @notice Activates or deactivates a license offer.
@@ -188,18 +176,11 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
 
         _safeMint(msg.sender, licenseId);
 
-        (bool success, ) = payable(offer.licensor).call{value: msg.value}("");
+        (bool success,) = payable(offer.licensor).call{value: msg.value}("");
         if (!success) revert PaymentTransferFailed();
 
         emit LicensePurchased(
-            offerId,
-            licenseId,
-            offer.assetId,
-            msg.sender,
-            offer.licensor,
-            msg.value,
-            issuedAt,
-            expiresAt
+            offerId, licenseId, offer.assetId, msg.sender, offer.licensor, msg.value, issuedAt, expiresAt
         );
     }
 
@@ -243,11 +224,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     }
 
     /// @dev Restricts transfer of non-transferable license certificate NFTs.
-    function _update(
-        address to,
-        uint256 tokenId,
-        address auth
-    ) internal override returns (address previousOwner) {
+    function _update(address to, uint256 tokenId, address auth) internal override returns (address previousOwner) {
         address from = _ownerOf(tokenId);
 
         if (from != address(0) && to != address(0)) {
@@ -270,4 +247,4 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
 
         offer = licenseOffers[offerId];
     }
-} 
+}

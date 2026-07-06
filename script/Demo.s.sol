@@ -20,32 +20,26 @@ contract Demo is Script {
     string private constant JURISDICTION = "US / CN";
     string private constant METADATA_URI = "ipfs://metadata-ai-patent-assistant";
 
-    bytes32 private constant DOCUMENT_HASH =
-        keccak256("AI Patent Drafting Assistant technical whitepaper v1");
+    bytes32 private constant DOCUMENT_HASH = keccak256("AI Patent Drafting Assistant technical whitepaper v1");
 
     string private constant GITHUB_COMMIT = "GITHUB_COMMIT";
     string private constant FTO_REPORT = "FTO_REPORT";
 
-    bytes32 private constant GITHUB_EVIDENCE_HASH =
-        keccak256("github commit proof for ai patent drafting assistant");
+    bytes32 private constant GITHUB_EVIDENCE_HASH = keccak256("github commit proof for ai patent drafting assistant");
 
-    bytes32 private constant FTO_REPORT_HASH =
-        keccak256("freedom to operate report for ai patent drafting assistant");
+    bytes32 private constant FTO_REPORT_HASH = keccak256("freedom to operate report for ai patent drafting assistant");
 
     string private constant GITHUB_EVIDENCE_URI = "ipfs://github-commit-proof";
     string private constant FTO_REPORT_URI = "ipfs://fto-report";
 
-    bytes32 private constant FTO_ATTESTATION_UID =
-        keccak256("mock-eas-attestation-uid-for-fto-report");
+    bytes32 private constant FTO_ATTESTATION_UID = keccak256("mock-eas-attestation-uid-for-fto-report");
 
     uint256 private constant LICENSE_PRICE = 0.001 ether; // testing with a smaller price for demo purposes
     uint64 private constant LICENSE_DURATION = 365 days;
 
-    bytes32 private constant TERMS_HASH =
-        keccak256("commercial internal use, no resale, no sublicensing");
+    bytes32 private constant TERMS_HASH = keccak256("commercial internal use, no resale, no sublicensing");
 
-    string private constant TERMS_URI =
-        "ipfs://license-terms-commercial-internal-use";
+    string private constant TERMS_URI = "ipfs://license-terms-commercial-internal-use";
 
     function run() external {
         uint256 adminPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -58,14 +52,11 @@ contract Demo is Script {
         address reviewer = vm.addr(reviewerPrivateKey);
         address bob = vm.addr(bobPrivateKey);
 
-        IPAssetRegistry assetRegistry =
-            IPAssetRegistry(vm.envAddress("IP_ASSET_REGISTRY"));
+        IPAssetRegistry assetRegistry = IPAssetRegistry(vm.envAddress("IP_ASSET_REGISTRY"));
 
-        EvidenceRegistry evidenceRegistry =
-            EvidenceRegistry(vm.envAddress("EVIDENCE_REGISTRY"));
+        EvidenceRegistry evidenceRegistry = EvidenceRegistry(vm.envAddress("EVIDENCE_REGISTRY"));
 
-        LicenseEscrow licenseEscrow =
-            LicenseEscrow(vm.envAddress("LICENSE_ESCROW"));
+        LicenseEscrow licenseEscrow = LicenseEscrow(vm.envAddress("LICENSE_ESCROW"));
 
         console2.log("Running IP Breaker RWA demo");
         console2.log("Admin:", admin);
@@ -88,25 +79,14 @@ contract Demo is Script {
         // 2. Alice registers an IP asset.
         vm.startBroadcast(alicePrivateKey);
 
-        uint256 assetId = assetRegistry.registerAsset(
-            TITLE,
-            ASSET_TYPE,
-            JURISDICTION,
-            DOCUMENT_HASH,
-            METADATA_URI
-        );
+        uint256 assetId = assetRegistry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
 
         console2.log("IP Asset registered");
         console2.log("assetId:", assetId);
 
         // 3. Alice adds ordinary technical evidence: GitHub commit proof.
-        uint256 githubEvidenceId = evidenceRegistry.addEvidence(
-            assetId,
-            GITHUB_COMMIT,
-            GITHUB_EVIDENCE_HASH,
-            GITHUB_EVIDENCE_URI,
-            bytes32(0)
-        );
+        uint256 githubEvidenceId =
+            evidenceRegistry.addEvidence(assetId, GITHUB_COMMIT, GITHUB_EVIDENCE_HASH, GITHUB_EVIDENCE_URI, bytes32(0));
 
         console2.log("GitHub evidence added");
         console2.log("githubEvidenceId:", githubEvidenceId);
@@ -116,13 +96,8 @@ contract Demo is Script {
         // 4. Reviewer adds due-diligence evidence: FTO report.
         vm.startBroadcast(reviewerPrivateKey);
 
-        uint256 ftoEvidenceId = evidenceRegistry.addEvidence(
-            assetId,
-            FTO_REPORT,
-            FTO_REPORT_HASH,
-            FTO_REPORT_URI,
-            FTO_ATTESTATION_UID
-        );
+        uint256 ftoEvidenceId =
+            evidenceRegistry.addEvidence(assetId, FTO_REPORT, FTO_REPORT_HASH, FTO_REPORT_URI, FTO_ATTESTATION_UID);
 
         vm.stopBroadcast();
 
@@ -132,14 +107,8 @@ contract Demo is Script {
         // 5. Alice creates a non-transferable commercial license offer.
         vm.startBroadcast(alicePrivateKey);
 
-        uint256 offerId = licenseEscrow.createLicenseOffer(
-            assetId,
-            LICENSE_PRICE,
-            LICENSE_DURATION,
-            TERMS_HASH,
-            TERMS_URI,
-            false
-        );
+        uint256 offerId =
+            licenseEscrow.createLicenseOffer(assetId, LICENSE_PRICE, LICENSE_DURATION, TERMS_HASH, TERMS_URI, false);
 
         vm.stopBroadcast();
 
@@ -173,4 +142,4 @@ contract Demo is Script {
 
         console2.log("Demo completed successfully");
     }
-} 
+}
