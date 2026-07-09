@@ -82,6 +82,17 @@ LicenseEscrow
     | restricts transfer for non-transferable licenses
 ```
 
+## Current Status
+
+- Core contracts completed
+- Unit tests completed
+- Integration demo test completed
+- Local Anvil deployment script completed
+- Local demo script completed
+- Public testnet deployment pending faucet funding
+- Frontend not started yet
+
+
 ## Contracts
 
 ### `IPAssetRegistry.sol`
