@@ -14,6 +14,26 @@ export const ipAssetRegistryAbi = [
   },
   {
     type: 'function',
+    name: 'getAsset',
+    stateMutability: 'view',
+    inputs: [{ name: 'assetId', type: 'uint256' }],
+    outputs: [
+      {
+        name: 'asset',
+        type: 'tuple',
+        components: [
+          { name: 'title', type: 'string' },
+          { name: 'assetType', type: 'string' },
+          { name: 'jurisdiction', type: 'string' },
+          { name: 'documentHash', type: 'bytes32' },
+          { name: 'metadataURI', type: 'string' },
+          { name: 'createdAt', type: 'uint256' },
+        ],
+      },
+    ],
+  },
+  {
+    type: 'function',
     name: 'ownerOf',
     stateMutability: 'view',
     inputs: [{ name: 'tokenId', type: 'uint256' }],
@@ -25,6 +45,13 @@ export const ipAssetRegistryAbi = [
     stateMutability: 'view',
     inputs: [{ name: 'tokenId', type: 'uint256' }],
     outputs: [{ name: '', type: 'string' }],
+  },
+  {
+    type: 'function',
+    name: 'nextAssetId',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
   },
 ] as const;
 
@@ -52,6 +79,48 @@ export const evidenceRegistryAbi = [
     ],
     outputs: [],
   },
+  {
+    type: 'function',
+    name: 'getEvidence',
+    stateMutability: 'view',
+    inputs: [{ name: 'evidenceId', type: 'uint256' }],
+    outputs: [
+      {
+        name: 'evidence',
+        type: 'tuple',
+        components: [
+          { name: 'assetId', type: 'uint256' },
+          { name: 'evidenceType', type: 'string' },
+          { name: 'evidenceHash', type: 'bytes32' },
+          { name: 'evidenceURI', type: 'string' },
+          { name: 'attestationUID', type: 'bytes32' },
+          { name: 'submittedBy', type: 'address' },
+          { name: 'submittedAt', type: 'uint256' },
+        ],
+      },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'getEvidenceIds',
+    stateMutability: 'view',
+    inputs: [{ name: 'assetId', type: 'uint256' }],
+    outputs: [{ name: 'evidenceIds', type: 'uint256[]' }],
+  },
+  {
+    type: 'function',
+    name: 'reviewers',
+    stateMutability: 'view',
+    inputs: [{ name: 'reviewer', type: 'address' }],
+    outputs: [{ name: 'approved', type: 'bool' }],
+  },
+  {
+    type: 'function',
+    name: 'nextEvidenceId',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
 ] as const;
 
 export const licenseEscrowAbi = [
@@ -78,9 +147,82 @@ export const licenseEscrowAbi = [
   },
   {
     type: 'function',
+    name: 'getLicenseOffer',
+    stateMutability: 'view',
+    inputs: [{ name: 'offerId', type: 'uint256' }],
+    outputs: [
+      {
+        name: 'offer',
+        type: 'tuple',
+        components: [
+          { name: 'assetId', type: 'uint256' },
+          { name: 'licensor', type: 'address' },
+          { name: 'price', type: 'uint256' },
+          { name: 'duration', type: 'uint64' },
+          { name: 'termsHash', type: 'bytes32' },
+          { name: 'termsURI', type: 'string' },
+          { name: 'transferable', type: 'bool' },
+          { name: 'active', type: 'bool' },
+          { name: 'createdAt', type: 'uint256' },
+        ],
+      },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'getLicense',
+    stateMutability: 'view',
+    inputs: [{ name: 'licenseId', type: 'uint256' }],
+    outputs: [
+      {
+        name: 'licenseData',
+        type: 'tuple',
+        components: [
+          { name: 'assetId', type: 'uint256' },
+          { name: 'offerId', type: 'uint256' },
+          { name: 'licensee', type: 'address' },
+          { name: 'issuedAt', type: 'uint256' },
+          { name: 'expiresAt', type: 'uint256' },
+          { name: 'termsHash', type: 'bytes32' },
+          { name: 'termsURI', type: 'string' },
+          { name: 'transferable', type: 'bool' },
+        ],
+      },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'isLicenseValid',
+    stateMutability: 'view',
+    inputs: [{ name: 'licenseId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
+    type: 'function',
+    name: 'tokenURI',
+    stateMutability: 'view',
+    inputs: [{ name: 'tokenId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'string' }],
+  },
+  {
+    type: 'function',
     name: 'totalRevenueByAsset',
     stateMutability: 'view',
     inputs: [{ name: 'assetId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'nextOfferId',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'nextLicenseId',
+    stateMutability: 'view',
+    inputs: [],
     outputs: [{ name: '', type: 'uint256' }],
   },
 ] as const;
