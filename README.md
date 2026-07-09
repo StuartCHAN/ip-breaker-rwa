@@ -352,38 +352,80 @@ The demo script will:
 6. buy the license;
 7. mint a License Certificate NFT.
 
-## Testnet deployment
 
-This project can be deployed to Sepolia, Base Sepolia, or Arbitrum Sepolia.
+## Deployment Status
 
-Example `.env` fields:
+### Local Anvil Demo
 
-```bash
-SEPOLIA_RPC_URL=
-BASE_SEPOLIA_RPC_URL=
-ARBITRUM_SEPOLIA_RPC_URL=
+Status: **Completed**
 
-PRIVATE_KEY=
-ALICE_PRIVATE_KEY=
-REVIEWER_PRIVATE_KEY=
-BOB_PRIVATE_KEY=
+The full IP Breaker RWA v0.1 demo flow can be executed locally with Anvil and Foundry scripts.
 
-IP_ASSET_REGISTRY=
-EVIDENCE_REGISTRY=
-LICENSE_ESCROW=
+The local demo covers:
+
+```text
+1. Deploy IPAssetRegistry, EvidenceRegistry, and LicenseEscrow
+2. Approve an authorized reviewer
+3. Register an IP asset: "AI Patent Drafting Assistant"
+4. Attach GitHub commit evidence
+5. Attach an FTO report by reviewer
+6. Create a non-transferable commercial license offer
+7. Buy the license with ETH
+8. Mint a License Certificate NFT to the buyer
+9. Record license revenue for the IP asset
 ```
 
-Use a dedicated testnet burner wallet. Do not use production wallets or mainnet private keys.
+Run local chain:
 
-### Sepolia
+```bash
+anvil
+```
+
+Deploy contracts locally:
 
 ```bash
 forge script script/Deploy.s.sol:Deploy \
-  --rpc-url $SEPOLIA_RPC_URL \
+  --rpc-url http://127.0.0.1:8545 \
   --broadcast
 ```
 
-### Base Sepolia
+After deployment, copy the printed contract addresses into `.env`:
+
+```bash
+IP_ASSET_REGISTRY=0x...
+EVIDENCE_REGISTRY=0x...
+LICENSE_ESCROW=0x...
+```
+
+Run the local demo script:
+
+```bash
+forge script script/Demo.s.sol:Demo \
+  --rpc-url http://127.0.0.1:8545 \
+  --broadcast
+```
+
+The same flow is also covered by the integration test:
+
+```bash
+forge test --match-path test/Integration.t.sol -vvv
+```
+
+### Public Testnet Deployment
+
+Status: **Pending faucet funding**
+
+Target networks:
+
+```text
+Base Sepolia
+Arbitrum Sepolia
+Ethereum Sepolia
+```
+
+The contracts are ready for testnet deployment, but public testnet deployment is currently pending because faucet funding for Base Sepolia / Arbitrum Sepolia is limited.
+
+Once testnet ETH is available, the project can be deployed with:
 
 ```bash
 forge script script/Deploy.s.sol:Deploy \
@@ -391,7 +433,7 @@ forge script script/Deploy.s.sol:Deploy \
   --broadcast
 ```
 
-### Arbitrum Sepolia
+or:
 
 ```bash
 forge script script/Deploy.s.sol:Deploy \
@@ -399,15 +441,18 @@ forge script script/Deploy.s.sol:Deploy \
   --broadcast
 ```
 
-After deployment, update `.env` with the deployed addresses and run:
+After successful deployment, this section will be updated with deployed contract addresses:
 
-```bash
-forge script script/Demo.s.sol:Demo \
-  --rpc-url $SEPOLIA_RPC_URL \
-  --broadcast
+```text
+Network: Base Sepolia or Arbitrum Sepolia
+
+IPAssetRegistry: 0x...
+EvidenceRegistry: 0x...
+LicenseEscrow: 0x...
 ```
 
-Replace `$SEPOLIA_RPC_URL` with the target network RPC variable if using Base Sepolia or Arbitrum Sepolia.
+For now, the project should be evaluated by its local Anvil demo, Foundry unit tests, integration test, deployment scripts, and contract architecture.
+
 
 ## Security notes
 
