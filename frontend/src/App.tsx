@@ -23,6 +23,12 @@ type EvidenceForm = {
   attestationUID: string;
 };
 
+type DataBlockProps = {
+  title: string;
+  data: unknown;
+  error?: Error | null;
+};
+
 function hashText(value: string): `0x${string}` {
   return keccak256(toHex(value));
 }
@@ -32,6 +38,38 @@ function requireAddress(value: `0x${string}` | undefined, label: string): `0x${s
     throw new Error(`${label} contract address is missing. Please set it in frontend/.env.`);
   }
   return value;
+}
+
+function parseUintInput(value: string): bigint {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return 0n;
+  return BigInt(normalized);
+}
+
+function isPositiveUintInput(value: string): boolean {
+  return parseUintInput(value) > 0n;
+}
+
+function formatUnknown(value: unknown): string {
+  if (value === undefined || value === null) return 'Not loaded';
+
+  return JSON.stringify(
+    value,
+    (_key, item) => {
+      if (typeof item === 'bigint') return item.toString();
+      return item;
+    },
+    2,
+  );
+}
+
+function DataBlock({ title, data, error }: DataBlockProps) {
+  return (
+    <div className="data-block">
+      <h3>{title}</h3>
+      {error ? <p className="error-text">{error.message}</p> : <pre>{formatUnknown(data)}</pre>}
+    </div>
+  );
 }
 
 function App() {
@@ -47,6 +85,17 @@ function App() {
 
   const [assetId, setAssetId] = useState('1');
   const [offerId, setOfferId] = useState('1');
+  const [evidenceId, setEvidenceId] = useState('1');
+  const [licenseId, setLicenseId] = useState('1');
+
+  const assetIdBigInt = parseUintInput(assetId);
+  const offerIdBigInt = parseUintInput(offerId);
+  const evidenceIdBigInt = parseUintInput(evidenceId);
+  const licenseIdBigInt = parseUintInput(licenseId);
+  const hasAssetId = isPositiveUintInput(assetId);
+  const hasOfferId = isPositiveUintInput(offerId);
+  const hasEvidenceId = isPositiveUintInput(evidenceId);
+  const hasLicenseId = isPositiveUintInput(licenseId);
 
   const [assetForm, setAssetForm] = useState({
     title: 'AI Patent Drafting Assistant',
@@ -78,13 +127,152 @@ function App() {
     return match?.name ?? `Unknown chain ${chainId}`;
   }, [chainId]);
 
-  const { data: totalRevenue } = useReadContract({
+  const { data: assetData, error: assetError } = useReadContract({
+    address: contractAddresses.ipAssetRegistry,
+    abi: ipAssetRegistryAbi,
+    functionName: 'getAsset',
+    args: [assetIdBigInt],
+    query: {
+      enabled: Boolean(contractAddresses.ipAssetRegistry && hasAssetId),
+    },
+  });
+
+  const { data: assetOwner, error: assetOwnerError } = useReadContract({
+    address: contractAddresses.ipAssetRegistry,
+    abi: ipAssetRegistryAbi,
+    functionName: 'ownerOf',
+    args: [assetIdBigInt],
+    query: {
+      enabled: Boolean(contractAddresses.ipAssetRegistry && hasAssetId),
+    },
+  });
+
+  const { data: assetTokenURI, error: assetTokenURIError } = useReadContract({
+    address: contractAddresses.ipAssetRegistry,
+    abi: ipAssetRegistryAbi,
+    functionName: 'tokenURI',
+    args: [assetIdBigInt],
+    query: {
+      enabled: Boolean(contractAddresses.ipAssetRegistry && hasAssetId),
+    },
+  });
+
+  const { data: nextAssetId } = useReadContract({
+    address: contractAddresses.ipAssetRegistry,
+    abi: ipAssetRegistryAbi,
+    functionName: 'nextAssetId',
+    query: {
+      enabled: Boolean(contractAddresses.ipAssetRegistry),
+    },
+  });
+
+  const { data: evidenceIds, error: evidenceIdsError } = useReadContract({
+    address: contractAddresses.evidenceRegistry,
+    abi: evidenceRegistryAbi,
+    functionName: 'getEvidenceIds',
+    args: [assetIdBigInt],
+    query: {
+      enabled: Boolean(contractAddresses.evidenceRegistry && hasAssetId),
+    },
+  });
+
+  const { data: evidenceData, error: evidenceError } = useReadContract({
+    address: contractAddresses.evidenceRegistry,
+    abi: evidenceRegistryAbi,
+    functionName: 'getEvidence',
+    args: [evidenceIdBigInt],
+    query: {
+      enabled: Boolean(contractAddresses.evidenceRegistry && hasEvidenceId),
+    },
+  });
+
+  const reviewerAddressForRead = reviewerAddress.trim() as `0x${string}`;
+  const isReviewerAddressReady = /^0x[a-fA-F0-9]{40}$/.test(reviewerAddress.trim());
+
+  const { data: reviewerApproved, error: reviewerError } = useReadContract({
+    address: contractAddresses.evidenceRegistry,
+    abi: evidenceRegistryAbi,
+    functionName: 'reviewers',
+    args: [reviewerAddressForRead],
+    query: {
+      enabled: Boolean(contractAddresses.evidenceRegistry && isReviewerAddressReady),
+    },
+  });
+
+  const { data: nextEvidenceId } = useReadContract({
+    address: contractAddresses.evidenceRegistry,
+    abi: evidenceRegistryAbi,
+    functionName: 'nextEvidenceId',
+    query: {
+      enabled: Boolean(contractAddresses.evidenceRegistry),
+    },
+  });
+
+  const { data: offerData, error: offerError } = useReadContract({
+    address: contractAddresses.licenseEscrow,
+    abi: licenseEscrowAbi,
+    functionName: 'getLicenseOffer',
+    args: [offerIdBigInt],
+    query: {
+      enabled: Boolean(contractAddresses.licenseEscrow && hasOfferId),
+    },
+  });
+
+  const { data: licenseData, error: licenseError } = useReadContract({
+    address: contractAddresses.licenseEscrow,
+    abi: licenseEscrowAbi,
+    functionName: 'getLicense',
+    args: [licenseIdBigInt],
+    query: {
+      enabled: Boolean(contractAddresses.licenseEscrow && hasLicenseId),
+    },
+  });
+
+  const { data: licenseValid, error: licenseValidError } = useReadContract({
+    address: contractAddresses.licenseEscrow,
+    abi: licenseEscrowAbi,
+    functionName: 'isLicenseValid',
+    args: [licenseIdBigInt],
+    query: {
+      enabled: Boolean(contractAddresses.licenseEscrow && hasLicenseId),
+    },
+  });
+
+  const { data: licenseTokenURI, error: licenseTokenURIError } = useReadContract({
+    address: contractAddresses.licenseEscrow,
+    abi: licenseEscrowAbi,
+    functionName: 'tokenURI',
+    args: [licenseIdBigInt],
+    query: {
+      enabled: Boolean(contractAddresses.licenseEscrow && hasLicenseId),
+    },
+  });
+
+  const { data: totalRevenue, error: revenueError } = useReadContract({
     address: contractAddresses.licenseEscrow,
     abi: licenseEscrowAbi,
     functionName: 'totalRevenueByAsset',
-    args: [BigInt(assetId || '0')],
+    args: [assetIdBigInt],
     query: {
-      enabled: Boolean(contractAddresses.licenseEscrow && assetId),
+      enabled: Boolean(contractAddresses.licenseEscrow && hasAssetId),
+    },
+  });
+
+  const { data: nextOfferId } = useReadContract({
+    address: contractAddresses.licenseEscrow,
+    abi: licenseEscrowAbi,
+    functionName: 'nextOfferId',
+    query: {
+      enabled: Boolean(contractAddresses.licenseEscrow),
+    },
+  });
+
+  const { data: nextLicenseId } = useReadContract({
+    address: contractAddresses.licenseEscrow,
+    abi: licenseEscrowAbi,
+    functionName: 'nextLicenseId',
+    query: {
+      enabled: Boolean(contractAddresses.licenseEscrow),
     },
   });
 
@@ -131,7 +319,7 @@ function App() {
         abi: evidenceRegistryAbi,
         functionName: 'addEvidence',
         args: [
-          BigInt(assetId),
+          assetIdBigInt,
           evidenceForm.evidenceType,
           hashText(evidenceForm.evidence),
           evidenceForm.evidenceURI,
@@ -162,7 +350,7 @@ function App() {
         abi: licenseEscrowAbi,
         functionName: 'createLicenseOffer',
         args: [
-          BigInt(assetId),
+          assetIdBigInt,
           parseEther(licenseForm.priceEth),
           durationSeconds,
           hashText(licenseForm.terms),
@@ -180,7 +368,7 @@ function App() {
         address: requireAddress(contractAddresses.licenseEscrow, 'LicenseEscrow'),
         abi: licenseEscrowAbi,
         functionName: 'buyLicense',
-        args: [BigInt(offerId)],
+        args: [offerIdBigInt],
         value: parseEther(licenseForm.priceEth),
       });
     });
@@ -275,7 +463,56 @@ function App() {
           <input value={assetId} onChange={(e) => setAssetId(e.target.value)} placeholder="Asset ID" />
           <p>Total revenue for this asset:</p>
           <strong>{typeof totalRevenue === 'bigint' ? `${formatEther(totalRevenue)} ETH` : 'Not loaded'}</strong>
+          {revenueError && <p className="error-text">{revenueError.message}</p>}
         </section>
+      </section>
+
+      <section className="card read-dashboard">
+        <div className="section-heading">
+          <p className="eyebrow dark">Read Dashboard</p>
+          <h2>Verify onchain state</h2>
+          <p className="hint">Use this panel after each transaction to confirm that the asset passport, evidence records, license offer, and license certificate were written onchain.</p>
+        </div>
+
+        <div className="read-inputs">
+          <label>
+            Asset ID
+            <input value={assetId} onChange={(event) => setAssetId(event.target.value)} placeholder="1" />
+          </label>
+          <label>
+            Evidence ID
+            <input value={evidenceId} onChange={(event) => setEvidenceId(event.target.value)} placeholder="1" />
+          </label>
+          <label>
+            Offer ID
+            <input value={offerId} onChange={(event) => setOfferId(event.target.value)} placeholder="1" />
+          </label>
+          <label>
+            License ID
+            <input value={licenseId} onChange={(event) => setLicenseId(event.target.value)} placeholder="1" />
+          </label>
+        </div>
+
+        <div className="summary-strip">
+          <span>Next Asset ID: {typeof nextAssetId === 'bigint' ? nextAssetId.toString() : '-'}</span>
+          <span>Next Evidence ID: {typeof nextEvidenceId === 'bigint' ? nextEvidenceId.toString() : '-'}</span>
+          <span>Next Offer ID: {typeof nextOfferId === 'bigint' ? nextOfferId.toString() : '-'}</span>
+          <span>Next License ID: {typeof nextLicenseId === 'bigint' ? nextLicenseId.toString() : '-'}</span>
+        </div>
+
+        <div className="read-grid">
+          <DataBlock title="Asset Passport" data={assetData} error={assetError} />
+          <DataBlock title="Asset Owner" data={assetOwner} error={assetOwnerError} />
+          <DataBlock title="Asset Token URI" data={assetTokenURI} error={assetTokenURIError} />
+          <DataBlock title="Evidence IDs for Asset" data={evidenceIds} error={evidenceIdsError} />
+          <DataBlock title="Evidence Record" data={evidenceData} error={evidenceError} />
+          <DataBlock title="Reviewer Approved" data={isReviewerAddressReady ? reviewerApproved : 'Enter a reviewer address above'} error={reviewerError} />
+          <DataBlock title="License Offer" data={offerData} error={offerError} />
+          <DataBlock title="License Certificate" data={licenseData} error={licenseError} />
+          <DataBlock title="License Valid" data={licenseValid} error={licenseValidError} />
+          <DataBlock title="License Token URI" data={licenseTokenURI} error={licenseTokenURIError} />
+          <DataBlock title="Total Revenue by Asset" data={typeof totalRevenue === 'bigint' ? `${formatEther(totalRevenue)} ETH` : totalRevenue} error={revenueError} />
+        </div>
       </section>
     </main>
   );
