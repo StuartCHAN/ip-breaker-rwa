@@ -80,6 +80,10 @@ textarea {
   font-weight: 700;
 }
 
+.eyebrow.dark {
+  color: #2563eb;
+}
+
 .subtitle {
   max-width: 760px;
   margin: 18px 0 0;
@@ -98,7 +102,8 @@ textarea {
   box-shadow: 0 10px 30px rgb(17 24 39 / 0.06);
 }
 
-.card h2 {
+.card h2,
+.card h3 {
   margin: 0;
 }
 
@@ -142,6 +147,12 @@ textarea {
   color: #6b7280;
 }
 
+.error-text {
+  margin: 0;
+  color: #b91c1c;
+  overflow-wrap: anywhere;
+}
+
 .checkbox-row {
   display: flex;
   align-items: center;
@@ -150,6 +161,82 @@ textarea {
 
 .checkbox-row input {
   width: auto;
+}
+
+.read-dashboard {
+  margin-top: 24px;
+}
+
+.section-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.read-inputs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.read-inputs label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #374151;
+  font-weight: 700;
+}
+
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.summary-strip span {
+  border-radius: 12px;
+  padding: 12px;
+  background: #f9fafb;
+  color: #374151;
+  font-weight: 700;
+}
+
+.read-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.data-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 16px;
+  background: #f9fafb;
+}
+
+.data-block pre {
+  min-height: 56px;
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  border-radius: 12px;
+  padding: 12px;
+  background: #111827;
+  color: #e5e7eb;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 920px) {
+  .read-inputs,
+  .summary-strip,
+  .read-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 820px) {
