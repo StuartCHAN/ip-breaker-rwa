@@ -16,6 +16,13 @@ import { contractAddresses } from './config';
 
 const zeroBytes32 = '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
 
+type EvidenceForm = {
+  evidenceType: string;
+  evidence: string;
+  evidenceURI: string;
+  attestationUID: string;
+};
+
 function hashText(value: string): `0x${string}` {
   return keccak256(toHex(value));
 }
@@ -49,7 +56,7 @@ function App() {
     metadataURI: 'ipfs://metadata-ai-patent-assistant',
   });
 
-  const [evidenceForm, setEvidenceForm] = useState({
+  const [evidenceForm, setEvidenceForm] = useState<EvidenceForm>({
     evidenceType: 'GITHUB_COMMIT',
     evidence: 'github commit proof for ai patent drafting assistant',
     evidenceURI: 'ipfs://github-commit-proof',
@@ -238,7 +245,7 @@ function App() {
           <input value={evidenceForm.evidenceType} onChange={(e) => setEvidenceForm({ ...evidenceForm, evidenceType: e.target.value })} placeholder="Evidence type" />
           <textarea value={evidenceForm.evidence} onChange={(e) => setEvidenceForm({ ...evidenceForm, evidence: e.target.value })} placeholder="Evidence text to hash" />
           <input value={evidenceForm.evidenceURI} onChange={(e) => setEvidenceForm({ ...evidenceForm, evidenceURI: e.target.value })} placeholder="Evidence URI" />
-          <input value={evidenceForm.attestationUID} onChange={(e) => setEvidenceForm({ ...evidenceForm, attestationUID: e.target.value as `0x${string}` })} placeholder="Attestation UID" />
+          <input value={evidenceForm.attestationUID} onChange={(e) => setEvidenceForm({ ...evidenceForm, attestationUID: e.target.value })} placeholder="Attestation UID" />
           <button type="submit">Add evidence</button>
         </form>
 
