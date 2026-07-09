@@ -1,0 +1,169 @@
+:root {
+  color: #1f2937;
+  background: #f3f4f6;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  background: #111827;
+  color: white;
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  padding: 0.75rem;
+  background: white;
+}
+
+textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+.app-shell {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 40px 0;
+}
+
+.hero {
+  padding: 32px;
+  border-radius: 24px;
+  background: linear-gradient(135deg, #111827, #374151);
+  color: white;
+  margin-bottom: 24px;
+}
+
+.hero h1 {
+  max-width: 840px;
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 4rem);
+  line-height: 1;
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: #bfdbfe;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+}
+
+.subtitle {
+  max-width: 760px;
+  margin: 18px 0 0;
+  color: #d1d5db;
+  font-size: 1.1rem;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid #e5e7eb;
+  border-radius: 20px;
+  background: white;
+  box-shadow: 0 10px 30px rgb(17 24 39 / 0.06);
+}
+
+.card h2 {
+  margin: 0;
+}
+
+.wallet-card {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.status-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+  border-radius: 16px;
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+
+.status-bar code {
+  overflow-wrap: anywhere;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.hint {
+  margin: 0;
+  color: #6b7280;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
+@media (max-width: 820px) {
+  .wallet-card,
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .wallet-card {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .button-row {
+    justify-content: flex-start;
+  }
+}
