@@ -82,6 +82,11 @@ function App() {
   });
 
   async function runTx(label: string, callback: () => Promise<`0x${string}`>) {
+    if (!isConnected) {
+      setStatus('Please connect your wallet first. The typed address is not enough; MetaMask must be connected to the app.');
+      return;
+    }
+
     try {
       setStatus(`${label}...`);
       const txHash = await callback();
