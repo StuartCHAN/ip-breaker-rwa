@@ -11,13 +11,16 @@
   },
   "dependencies": {
     "@tanstack/react-query": "latest",
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
     "react": "latest",
     "react-dom": "latest",
     "wagmi": "latest",
     "viem": "latest"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
 }
