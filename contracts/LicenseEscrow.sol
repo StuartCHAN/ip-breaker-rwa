@@ -9,9 +9,13 @@ import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 
 /// @title LicenseEscrow
 /// @notice Creates license offers for registered IP assets and mints license certificate NFTs.
+///         Also supports an escrow-based licensing flow with dispute arbitration between
+///         a licensor, a licensee, and a global arbiter.
 /// @dev The License Certificate NFT represents a usage-right certificate,
 ///      not an investment product or fractional ownership of the underlying IP.
 contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
+    // ============ Types: existing offer/license NFT flow ============
+
     struct LicenseOffer {
         uint256 assetId;
         address licensor;
@@ -35,6 +39,32 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         bool transferable;
     }
 
+    // ============ Types: escrow + arbitration flow ============
+
+    enum LicenseStatus {
+        Created, // 已创建，等待被许可方付款
+        Funded, // 已付款，资金托管中，等待权利人确认履行
+        Active, // 权利人已确认履行，等待被许可方验收放款或发起争议
+        Disputed, // 争议中，等待仲裁方裁决
+        Completed, // 资金已释放给权利人（正常放款或仲裁裁决支持权利人）
+        Refunded, // 资金已退还被许可方（仲裁裁决支持被许可方）
+        Cancelled // 付款前被权利人取消
+
+    }
+
+    struct LicenseAgreement {
+        uint256 assetId; // 关联的 IP 资产编号
+        address licensor; // 权利人
+        LicenseStatus status; // 当前状态（与 licensor 同槽打包）
+        address licensee; // 被许可方
+        uint256 licenseFee; // 约定许可费（wei）
+        uint256 escrowedAmount; // 实际已托管金额，释放/退款后清零
+        uint256 createdAt; // 创建时间戳
+        uint256 fundedAt; // 付款时间戳（0 表示尚未付款）
+    }
+
+    // ============ Errors: existing offer/license NFT flow ============
+
     error ZeroAssetRegistry();
     error AssetDoesNotExist(uint256 assetId);
     error NotAssetOwner(uint256 assetId, address caller);
@@ -51,6 +81,21 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     error PaymentTransferFailed();
     error LicenseDoesNotExist(uint256 licenseId);
     error NonTransferableLicense(uint256 licenseId);
+
+    // ============ Errors: escrow + arbitration flow ============
+
+    error AgreementDoesNotExist(uint256 agreementId);
+    error NotLicensor(uint256 agreementId, address caller);
+    error NotLicensee(uint256 agreementId, address caller);
+    error NotLicensorOrLicensee(uint256 agreementId, address caller);
+    error NotArbiter(address caller);
+    error InvalidStatusTransition(LicenseStatus from, LicenseStatus to);
+    error IncorrectLicenseFee(uint256 expected, uint256 actual);
+    error ZeroLicenseFee();
+    error InvalidLicensee();
+    error ZeroArbiter();
+
+    // ============ Events: existing offer/license NFT flow ============
 
     event LicenseOfferCreated(
         uint256 indexed offerId,
@@ -76,6 +121,34 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         uint256 expiresAt
     );
 
+    // ============ Events: escrow + arbitration flow ============
+
+    event LicenseAgreementCreated(
+        uint256 indexed agreementId,
+        uint256 indexed assetId,
+        address indexed licensor,
+        address licensee,
+        uint256 licenseFee
+    );
+
+    event LicenseStatusChanged(uint256 indexed agreementId, LicenseStatus from, LicenseStatus to);
+
+    event LicenseFunded(uint256 indexed agreementId, address indexed licensee, uint256 amount);
+
+    event PerformanceConfirmed(uint256 indexed agreementId, address indexed licensor);
+
+    event FundsReleased(uint256 indexed agreementId, address indexed to, uint256 amount);
+
+    event DisputeRaised(uint256 indexed agreementId, address indexed raisedBy);
+
+    event DisputeResolved(uint256 indexed agreementId, bool paidToLicensor, uint256 amount);
+
+    event AgreementCancelled(uint256 indexed agreementId);
+
+    event ArbiterUpdated(address indexed previousArbiter, address indexed newArbiter);
+
+    // ============ Storage ============
+
     IIPAssetRegistry public immutable assetRegistry;
 
     uint256 private _nextOfferId = 1;
@@ -85,10 +158,25 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     mapping(uint256 licenseId => License licenseData) public licenses;
     mapping(uint256 assetId => uint256 totalRevenue) public totalRevenueByAsset;
 
+    /// @notice Global arbiter role for the escrow + dispute flow. Deployer by default.
+    address public arbiter;
+
+    uint256 private _nextAgreementId = 1;
+
+    mapping(uint256 agreementId => LicenseAgreement agreement) public agreements;
+
     constructor(address assetRegistry_) ERC721("IP Breaker License", "IPBL") Ownable(msg.sender) {
         if (assetRegistry_ == address(0)) revert ZeroAssetRegistry();
         assetRegistry = IIPAssetRegistry(assetRegistry_);
+
+        // Arbiter defaults to the deployer and can be reassigned later via setArbiter().
+        // Kept out of the constructor signature so existing deployments/tests are unaffected.
+        arbiter = msg.sender;
     }
+
+    // ======================================================================
+    // Existing offer/license NFT flow (unchanged)
+    // ======================================================================
 
     /// @notice Creates a license offer for an existing IP asset.
     /// @dev Only the current owner of the IP Asset NFT can create a license offer.
@@ -223,6 +311,166 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         return _nextLicenseId;
     }
 
+    // ======================================================================
+    // Escrow + arbitration flow
+    // ======================================================================
+
+    /// @notice Creates a new escrow-based license agreement in the Created state.
+    /// @dev Only the current owner of the IP Asset NFT can create an agreement.
+    function createLicenseAgreement(uint256 assetId, address licensee, uint256 licenseFee)
+        external
+        returns (uint256 agreementId)
+    {
+        if (!assetRegistry.exists(assetId)) revert AssetDoesNotExist(assetId);
+        if (assetRegistry.ownerOf(assetId) != msg.sender) {
+            revert NotAssetOwner(assetId, msg.sender);
+        }
+        if (licensee == address(0) || licensee == msg.sender) revert InvalidLicensee();
+        if (licenseFee == 0) revert ZeroLicenseFee();
+
+        agreementId = _nextAgreementId++;
+
+        agreements[agreementId] = LicenseAgreement({
+            assetId: assetId,
+            licensor: msg.sender,
+            status: LicenseStatus.Created,
+            licensee: licensee,
+            licenseFee: licenseFee,
+            escrowedAmount: 0,
+            createdAt: block.timestamp,
+            fundedAt: 0
+        });
+
+        emit LicenseAgreementCreated(agreementId, assetId, msg.sender, licensee, licenseFee);
+    }
+
+    /// @notice Licensee pays the agreed license fee into escrow.
+    /// @dev Reverts on a second call because the agreement is no longer in Created status
+    ///      once funded — the transition gate itself prevents double payment.
+    function fundLicense(uint256 agreementId) external payable nonReentrant {
+        LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
+
+        if (msg.sender != agreement.licensee) revert NotLicensee(agreementId, msg.sender);
+        if (msg.value != agreement.licenseFee) {
+            revert IncorrectLicenseFee(agreement.licenseFee, msg.value);
+        }
+
+        _transition(agreementId, agreement, LicenseStatus.Funded);
+
+        agreement.escrowedAmount = msg.value;
+        agreement.fundedAt = block.timestamp;
+
+        emit LicenseFunded(agreementId, msg.sender, msg.value);
+    }
+
+    /// @notice Licensor confirms that performance (delivery of the licensed rights) is done.
+    function confirmPerformance(uint256 agreementId) external {
+        LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
+
+        if (msg.sender != agreement.licensor) revert NotLicensor(agreementId, msg.sender);
+
+        _transition(agreementId, agreement, LicenseStatus.Active);
+
+        emit PerformanceConfirmed(agreementId, msg.sender);
+    }
+
+    /// @notice Licensee accepts performance and releases escrowed funds to the licensor.
+    /// @dev Completed is also reachable from Disputed via resolveDispute(), so the shared
+    ///      transition graph alone can't tell these two paths apart. This explicit check is
+    ///      what actually enforces rule 7 (no release while Disputed) — _isValidTransition
+    ///      is a topology check, not a "who's allowed to fire from where right now" check.
+    function release(uint256 agreementId) external nonReentrant {
+        LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
+
+        if (msg.sender != agreement.licensee) revert NotLicensee(agreementId, msg.sender);
+        if (agreement.status != LicenseStatus.Active) {
+            revert InvalidStatusTransition(agreement.status, LicenseStatus.Completed);
+        }
+
+        _transition(agreementId, agreement, LicenseStatus.Completed);
+
+        uint256 amount = agreement.escrowedAmount;
+        agreement.escrowedAmount = 0;
+
+        (bool success,) = payable(agreement.licensor).call{value: amount}("");
+        if (!success) revert PaymentTransferFailed();
+
+        emit FundsReleased(agreementId, agreement.licensor, amount);
+    }
+
+    /// @notice Either party raises a dispute from Funded or Active, freezing the escrow.
+    function raiseDispute(uint256 agreementId) external {
+        LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
+
+        if (msg.sender != agreement.licensor && msg.sender != agreement.licensee) {
+            revert NotLicensorOrLicensee(agreementId, msg.sender);
+        }
+
+        _transition(agreementId, agreement, LicenseStatus.Disputed);
+
+        emit DisputeRaised(agreementId, msg.sender);
+    }
+
+    /// @notice Arbiter resolves a dispute, paying either the licensor or the licensee.
+    /// @dev Mirrors the explicit check in release(): Completed is reachable from both Active
+    ///      and Disputed in the shared graph, so we pin the required starting state here too —
+    ///      otherwise an arbiter could force-complete an agreement that was never disputed.
+    function resolveDispute(uint256 agreementId, bool payToLicensor) external nonReentrant {
+        LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
+
+        if (msg.sender != arbiter) revert NotArbiter(msg.sender);
+        if (agreement.status != LicenseStatus.Disputed) {
+            revert InvalidStatusTransition(
+                agreement.status, payToLicensor ? LicenseStatus.Completed : LicenseStatus.Refunded
+            );
+        }
+
+        _transition(agreementId, agreement, payToLicensor ? LicenseStatus.Completed : LicenseStatus.Refunded);
+
+        uint256 amount = agreement.escrowedAmount;
+        agreement.escrowedAmount = 0;
+
+        address recipient = payToLicensor ? agreement.licensor : agreement.licensee;
+
+        (bool success,) = payable(recipient).call{value: amount}("");
+        if (!success) revert PaymentTransferFailed();
+
+        emit DisputeResolved(agreementId, payToLicensor, amount);
+    }
+
+    /// @notice Licensor cancels an agreement before it has been funded.
+    function cancelAgreement(uint256 agreementId) external {
+        LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
+
+        if (msg.sender != agreement.licensor) revert NotLicensor(agreementId, msg.sender);
+
+        _transition(agreementId, agreement, LicenseStatus.Cancelled);
+
+        emit AgreementCancelled(agreementId);
+    }
+
+    /// @notice Updates the global arbiter address.
+    function setArbiter(address newArbiter) external onlyOwner {
+        if (newArbiter == address(0)) revert ZeroArbiter();
+
+        emit ArbiterUpdated(arbiter, newArbiter);
+        arbiter = newArbiter;
+    }
+
+    /// @notice Returns a license agreement by ID.
+    function getAgreement(uint256 agreementId) external view returns (LicenseAgreement memory) {
+        return _getExistingAgreement(agreementId);
+    }
+
+    /// @notice Returns the next license agreement ID that will be assigned.
+    function nextAgreementId() external view returns (uint256) {
+        return _nextAgreementId;
+    }
+
+    // ======================================================================
+    // Internal
+    // ======================================================================
+
     /// @dev Restricts transfer of non-transferable license certificate NFTs.
     function _update(address to, uint256 tokenId, address auth) internal override returns (address previousOwner) {
         address from = _ownerOf(tokenId);
@@ -246,5 +494,46 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         }
 
         offer = licenseOffers[offerId];
+    }
+
+    function _getExistingAgreement(uint256 agreementId) internal view returns (LicenseAgreement storage agreement) {
+        if (agreementId == 0 || agreementId >= _nextAgreementId) {
+            revert AgreementDoesNotExist(agreementId);
+        }
+
+        agreement = agreements[agreementId];
+    }
+
+    /// @dev Single choke point for every agreement status change: validates the edge against
+    ///      the state graph, writes the new status, and emits LicenseStatusChanged. Every
+    ///      external function that moves an agreement forward goes through this — so every
+    ///      legal transition is logged (rule 9) and every illegal one reverts here (rule 10)
+    ///      instead of each function re-implementing its own status checks.
+    function _transition(uint256 agreementId, LicenseAgreement storage agreement, LicenseStatus to) internal {
+        LicenseStatus from = agreement.status;
+
+        if (!_isValidTransition(from, to)) revert InvalidStatusTransition(from, to);
+
+        agreement.status = to;
+
+        emit LicenseStatusChanged(agreementId, from, to);
+    }
+
+    /// @dev Encodes the state graph from the design doc. Terminal states
+    ///      (Completed, Refunded, Cancelled) have no outgoing edges.
+    function _isValidTransition(LicenseStatus from, LicenseStatus to) internal pure returns (bool) {
+        if (from == LicenseStatus.Created) {
+            return to == LicenseStatus.Funded || to == LicenseStatus.Cancelled;
+        }
+        if (from == LicenseStatus.Funded) {
+            return to == LicenseStatus.Active || to == LicenseStatus.Disputed;
+        }
+        if (from == LicenseStatus.Active) {
+            return to == LicenseStatus.Completed || to == LicenseStatus.Disputed;
+        }
+        if (from == LicenseStatus.Disputed) {
+            return to == LicenseStatus.Completed || to == LicenseStatus.Refunded;
+        }
+        return false;
     }
 }
