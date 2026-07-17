@@ -583,13 +583,16 @@ Future improvements may include:
 - React frontend demo
 - Read Dashboard
 
-### v0.2
 
-- IPFS metadata and evidence bundle upload
-- Event indexing
-- richer asset passport page
-- reviewer dashboard
-- optional backend service for metadata generation
+### v0.2 Escrow-based License Agreement
+
+This branch adds an escrow + arbitration licensing flow:
+
+1. Licensor creates a license agreement for a named licensee.
+2. Licensee funds the agreement.
+3. Licensor confirms performance.
+4. Licensee releases funds, or either party raises a dispute.
+5. A snapshotted arbiter resolves the dispute.
 
 ### v0.3
 
