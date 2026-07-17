@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
@@ -437,8 +438,7 @@ contract LicenseEscrowAgreementTest is Test {
         uint256 assetId = _registerDefaultAsset(address(rejectingLicensor));
 
         vm.prank(address(rejectingLicensor));
-        uint256 agreementId =
-            licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
+        uint256 agreementId = licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
 
         vm.prank(bob);
         licenseEscrow.fundLicense{value: LICENSE_FEE}(agreementId);
@@ -833,7 +833,15 @@ contract LicenseEscrowAgreementTest is Test {
 
 /// @dev Minimal contract that rejects any plain ETH transfer, used to test that push-payment
 ///      failures in release()/resolveDispute() revert cleanly instead of corrupting state.
-contract RejectingReceiver {
+///      Implements IERC721Receiver so it CAN receive the IP Asset NFT when used as a
+///      licensor via registerAsset() -> _safeMint() (which requires onERC721Received on any
+///      contract recipient) — otherwise the test would revert during asset registration,
+///      before ever reaching the release() call it's actually meant to exercise.
+contract RejectingReceiver is IERC721Receiver {
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        return IERC721Receiver.onERC721Received.selector;
+    }
+
     receive() external payable {
         revert("RejectingReceiver: no thanks");
     }
