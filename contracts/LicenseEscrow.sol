@@ -10,7 +10,8 @@ import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 /// @title LicenseEscrow
 /// @notice Creates license offers for registered IP assets and mints license certificate NFTs.
 ///         Also supports an escrow-based licensing flow with dispute arbitration between
-///         a licensor, a licensee, and a global arbiter.
+///         a licensor, a licensee, and an arbiter snapshotted per agreement (see `arbiter`
+///         and `createLicenseAgreement` for how the global default is captured per deal).
 /// @dev The License Certificate NFT represents a usage-right certificate,
 ///      not an investment product or fractional ownership of the underlying IP.
 contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
@@ -52,15 +53,26 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
 
     }
 
+    /// @dev v0.1 KNOWN LIMITATION: there are no funding/performance/acceptance deadlines.
+    ///      An agreement can only move forward via an explicit action from the licensor,
+    ///      licensee, or arbiter — if a party goes silent (e.g. licensor never calls
+    ///      confirmPerformance, or the arbiter never resolves a dispute), funds stay locked
+    ///      in escrow indefinitely with no automatic timeout/refund path. Timeout-based
+    ///      auto-transitions (e.g. Funded -> Refunded after a performance deadline) are
+    ///      planned for a later version and intentionally out of scope here.
     struct LicenseAgreement {
         uint256 assetId; // 关联的 IP 资产编号
         address licensor; // 权利人
         LicenseStatus status; // 当前状态（与 licensor 同槽打包）
         address licensee; // 被许可方
+        // 创建时从全局 arbiter 快照进来的仲裁人地址。后续 setArbiter() 更换全局仲裁人
+        // 不会影响已创建的协议——避免争议发生后仲裁人被中途替换的信任风险。
+        address arbiter;
         uint256 licenseFee; // 约定许可费（wei）
         uint256 escrowedAmount; // 实际已托管金额，释放/退款后清零
-        uint256 createdAt; // 创建时间戳
-        uint256 fundedAt; // 付款时间戳（0 表示尚未付款）
+        bytes32 termsHash; // 许可条款哈希；完整条款文本/URI 只在创建事件中记录，不占用存储
+        uint64 createdAt; // 创建时间戳（与 fundedAt 同槽打包）
+        uint64 fundedAt; // 付款时间戳（0 表示尚未付款）
     }
 
     // ============ Errors: existing offer/license NFT flow ============
@@ -88,7 +100,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     error NotLicensor(uint256 agreementId, address caller);
     error NotLicensee(uint256 agreementId, address caller);
     error NotLicensorOrLicensee(uint256 agreementId, address caller);
-    error NotArbiter(address caller);
+    error NotArbiter(uint256 agreementId, address caller);
     error InvalidStatusTransition(LicenseStatus from, LicenseStatus to);
     error IncorrectLicenseFee(uint256 expected, uint256 actual);
     error ZeroLicenseFee();
@@ -128,7 +140,10 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         uint256 indexed assetId,
         address indexed licensor,
         address licensee,
-        uint256 licenseFee
+        address arbiter,
+        uint256 licenseFee,
+        bytes32 termsHash,
+        string termsURI
     );
 
     event LicenseStatusChanged(uint256 indexed agreementId, LicenseStatus from, LicenseStatus to);
@@ -316,17 +331,24 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     // ======================================================================
 
     /// @notice Creates a new escrow-based license agreement in the Created state.
-    /// @dev Only the current owner of the IP Asset NFT can create an agreement.
-    function createLicenseAgreement(uint256 assetId, address licensee, uint256 licenseFee)
-        external
-        returns (uint256 agreementId)
-    {
+    /// @dev Only the current owner of the IP Asset NFT can create an agreement. Snapshots
+    ///      the current global `arbiter` into the agreement so a later setArbiter() call
+    ///      cannot change who adjudicates an already-created (possibly already-funded) deal.
+    function createLicenseAgreement(
+        uint256 assetId,
+        address licensee,
+        uint256 licenseFee,
+        bytes32 termsHash,
+        string calldata termsURI
+    ) external returns (uint256 agreementId) {
         if (!assetRegistry.exists(assetId)) revert AssetDoesNotExist(assetId);
         if (assetRegistry.ownerOf(assetId) != msg.sender) {
             revert NotAssetOwner(assetId, msg.sender);
         }
         if (licensee == address(0) || licensee == msg.sender) revert InvalidLicensee();
         if (licenseFee == 0) revert ZeroLicenseFee();
+        if (termsHash == bytes32(0)) revert ZeroTermsHash();
+        if (bytes(termsURI).length == 0) revert EmptyTermsURI();
 
         agreementId = _nextAgreementId++;
 
@@ -335,18 +357,23 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
             licensor: msg.sender,
             status: LicenseStatus.Created,
             licensee: licensee,
+            arbiter: arbiter,
             licenseFee: licenseFee,
             escrowedAmount: 0,
-            createdAt: block.timestamp,
+            termsHash: termsHash,
+            createdAt: uint64(block.timestamp),
             fundedAt: 0
         });
 
-        emit LicenseAgreementCreated(agreementId, assetId, msg.sender, licensee, licenseFee);
+        emit LicenseAgreementCreated(agreementId, assetId, msg.sender, licensee, arbiter, licenseFee, termsHash, termsURI);
     }
 
     /// @notice Licensee pays the agreed license fee into escrow.
     /// @dev Reverts on a second call because the agreement is no longer in Created status
-    ///      once funded — the transition gate itself prevents double payment.
+    ///      once funded — the transition gate itself prevents double payment. Also re-checks
+    ///      asset ownership: if the licensor has since transferred away the underlying IP
+    ///      Asset NFT, the agreement is stale and funding is rejected (mirrors buyLicense()'s
+    ///      LicensorNoLongerAssetOwner check in the direct-purchase flow, for consistency).
     function fundLicense(uint256 agreementId) external payable nonReentrant {
         LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
 
@@ -354,11 +381,14 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         if (msg.value != agreement.licenseFee) {
             revert IncorrectLicenseFee(agreement.licenseFee, msg.value);
         }
+        if (assetRegistry.ownerOf(agreement.assetId) != agreement.licensor) {
+            revert LicensorNoLongerAssetOwner(agreement.assetId, agreement.licensor);
+        }
 
         _transition(agreementId, agreement, LicenseStatus.Funded);
 
         agreement.escrowedAmount = msg.value;
-        agreement.fundedAt = block.timestamp;
+        agreement.fundedAt = uint64(block.timestamp);
 
         emit LicenseFunded(agreementId, msg.sender, msg.value);
     }
@@ -391,6 +421,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
 
         uint256 amount = agreement.escrowedAmount;
         agreement.escrowedAmount = 0;
+        totalRevenueByAsset[agreement.assetId] += amount;
 
         (bool success,) = payable(agreement.licensor).call{value: amount}("");
         if (!success) revert PaymentTransferFailed();
@@ -415,10 +446,12 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     /// @dev Mirrors the explicit check in release(): Completed is reachable from both Active
     ///      and Disputed in the shared graph, so we pin the required starting state here too —
     ///      otherwise an arbiter could force-complete an agreement that was never disputed.
+    ///      Checks against agreement.arbiter (snapshotted at creation), not the current global
+    ///      arbiter — see createLicenseAgreement's NatSpec for why.
     function resolveDispute(uint256 agreementId, bool payToLicensor) external nonReentrant {
         LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
 
-        if (msg.sender != arbiter) revert NotArbiter(msg.sender);
+        if (msg.sender != agreement.arbiter) revert NotArbiter(agreementId, msg.sender);
         if (agreement.status != LicenseStatus.Disputed) {
             revert InvalidStatusTransition(
                 agreement.status, payToLicensor ? LicenseStatus.Completed : LicenseStatus.Refunded
@@ -431,6 +464,12 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         agreement.escrowedAmount = 0;
 
         address recipient = payToLicensor ? agreement.licensor : agreement.licensee;
+
+        // Only a payout to the licensor counts as realized license revenue for the asset —
+        // a refund to the licensee is money going back, not revenue.
+        if (payToLicensor) {
+            totalRevenueByAsset[agreement.assetId] += amount;
+        }
 
         (bool success,) = payable(recipient).call{value: amount}("");
         if (!success) revert PaymentTransferFailed();

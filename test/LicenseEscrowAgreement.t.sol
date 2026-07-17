@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
@@ -25,15 +26,22 @@ contract LicenseEscrowAgreementTest is Test {
     bytes32 private constant DOCUMENT_HASH = keccak256("AI Patent Drafting Assistant technical whitepaper v1");
 
     uint256 private constant LICENSE_FEE = 0.01 ether;
+    bytes32 private constant TERMS_HASH = keccak256("commercial internal use, no resale, no sublicensing");
+    string private constant TERMS_URI = "ipfs://license-terms-commercial-internal-use";
 
     event LicenseAgreementCreated(
         uint256 indexed agreementId,
         uint256 indexed assetId,
         address indexed licensor,
         address licensee,
-        uint256 licenseFee
+        address arbiter,
+        uint256 licenseFee,
+        bytes32 termsHash,
+        string termsURI
     );
-    event LicenseStatusChanged(uint256 indexed agreementId, LicenseEscrow.LicenseStatus from, LicenseEscrow.LicenseStatus to);
+    event LicenseStatusChanged(
+        uint256 indexed agreementId, LicenseEscrow.LicenseStatus from, LicenseEscrow.LicenseStatus to
+    );
     event LicenseFunded(uint256 indexed agreementId, address indexed licensee, uint256 amount);
     event PerformanceConfirmed(uint256 indexed agreementId, address indexed licensor);
     event FundsReleased(uint256 indexed agreementId, address indexed to, uint256 amount);
@@ -62,7 +70,7 @@ contract LicenseEscrowAgreementTest is Test {
         uint256 assetId = _registerDefaultAsset(alice);
 
         vm.prank(alice);
-        uint256 agreementId = licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE);
+        uint256 agreementId = licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
 
         assertEq(agreementId, 1);
 
@@ -70,8 +78,10 @@ contract LicenseEscrowAgreementTest is Test {
         assertEq(agreement.assetId, assetId);
         assertEq(agreement.licensor, alice);
         assertEq(agreement.licensee, bob);
+        assertEq(agreement.arbiter, dave);
         assertEq(agreement.licenseFee, LICENSE_FEE);
         assertEq(agreement.escrowedAmount, 0);
+        assertEq(agreement.termsHash, TERMS_HASH);
         assertEq(uint8(agreement.status), uint8(LicenseEscrow.LicenseStatus.Created));
         assertEq(agreement.createdAt, block.timestamp);
         assertEq(agreement.fundedAt, 0);
@@ -81,10 +91,10 @@ contract LicenseEscrowAgreementTest is Test {
         uint256 assetId = _registerDefaultAsset(alice);
 
         vm.expectEmit(true, true, true, true, address(licenseEscrow));
-        emit LicenseAgreementCreated(1, assetId, alice, bob, LICENSE_FEE);
+        emit LicenseAgreementCreated(1, assetId, alice, bob, dave, LICENSE_FEE, TERMS_HASH, TERMS_URI);
 
         vm.prank(alice);
-        licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE);
+        licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
     }
 
     function testCreateLicenseAgreementRevertsWhenAssetDoesNotExist() public {
@@ -93,7 +103,7 @@ contract LicenseEscrowAgreementTest is Test {
         vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.AssetDoesNotExist.selector, missingAssetId));
 
         vm.prank(alice);
-        licenseEscrow.createLicenseAgreement(missingAssetId, bob, LICENSE_FEE);
+        licenseEscrow.createLicenseAgreement(missingAssetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
     }
 
     function testCreateLicenseAgreementRevertsWhenCallerIsNotAssetOwner() public {
@@ -102,7 +112,7 @@ contract LicenseEscrowAgreementTest is Test {
         vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotAssetOwner.selector, assetId, bob));
 
         vm.prank(bob);
-        licenseEscrow.createLicenseAgreement(assetId, carol, LICENSE_FEE);
+        licenseEscrow.createLicenseAgreement(assetId, carol, LICENSE_FEE, TERMS_HASH, TERMS_URI);
     }
 
     function testCreateLicenseAgreementRevertsWhenLicenseeIsZeroAddress() public {
@@ -111,7 +121,7 @@ contract LicenseEscrowAgreementTest is Test {
         vm.expectRevert(LicenseEscrow.InvalidLicensee.selector);
 
         vm.prank(alice);
-        licenseEscrow.createLicenseAgreement(assetId, address(0), LICENSE_FEE);
+        licenseEscrow.createLicenseAgreement(assetId, address(0), LICENSE_FEE, TERMS_HASH, TERMS_URI);
     }
 
     function testCreateLicenseAgreementRevertsWhenLicenseeIsLicensor() public {
@@ -120,7 +130,7 @@ contract LicenseEscrowAgreementTest is Test {
         vm.expectRevert(LicenseEscrow.InvalidLicensee.selector);
 
         vm.prank(alice);
-        licenseEscrow.createLicenseAgreement(assetId, alice, LICENSE_FEE);
+        licenseEscrow.createLicenseAgreement(assetId, alice, LICENSE_FEE, TERMS_HASH, TERMS_URI);
     }
 
     function testCreateLicenseAgreementRevertsWhenFeeIsZero() public {
@@ -129,7 +139,25 @@ contract LicenseEscrowAgreementTest is Test {
         vm.expectRevert(LicenseEscrow.ZeroLicenseFee.selector);
 
         vm.prank(alice);
-        licenseEscrow.createLicenseAgreement(assetId, bob, 0);
+        licenseEscrow.createLicenseAgreement(assetId, bob, 0, TERMS_HASH, TERMS_URI);
+    }
+
+    function testCreateLicenseAgreementRevertsWhenTermsHashIsZero() public {
+        uint256 assetId = _registerDefaultAsset(alice);
+
+        vm.expectRevert(LicenseEscrow.ZeroTermsHash.selector);
+
+        vm.prank(alice);
+        licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, bytes32(0), TERMS_URI);
+    }
+
+    function testCreateLicenseAgreementRevertsWhenTermsURIIsEmpty() public {
+        uint256 assetId = _registerDefaultAsset(alice);
+
+        vm.expectRevert(LicenseEscrow.EmptyTermsURI.selector);
+
+        vm.prank(alice);
+        licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, "");
     }
 
     // ======================================================================
@@ -149,17 +177,21 @@ contract LicenseEscrowAgreementTest is Test {
         assertEq(address(licenseEscrow).balance, LICENSE_FEE);
     }
 
-    function testFundLicenseEmitsFundedAndStatusChangedEvents() public {
+    /// @dev Explicitly checks BOTH events fundLicense() emits, in order — not just the
+    ///      business-specific LicenseFunded event. Rule 9 requires every status change to
+    ///      produce an event, and LicenseStatusChanged is the one that actually proves that;
+    ///      asserting only LicenseFunded would silently pass even if _transition() never fired.
+    function testFundLicenseEmitsStatusChangedAndFundedEventsInOrder() public {
         uint256 agreementId = _createDefaultAgreement();
 
-        vm.expectEmit(true, true, true, true, address(licenseEscrow));
+        vm.expectEmit(true, false, false, true, address(licenseEscrow));
+        emit LicenseStatusChanged(agreementId, LicenseEscrow.LicenseStatus.Created, LicenseEscrow.LicenseStatus.Funded);
+
+        vm.expectEmit(true, true, false, true, address(licenseEscrow));
         emit LicenseFunded(agreementId, bob, LICENSE_FEE);
 
         vm.prank(bob);
         licenseEscrow.fundLicense{value: LICENSE_FEE}(agreementId);
-
-        // TODO: also assert LicenseStatusChanged(agreementId, Created, Funded) was emitted
-        // (split into its own vm.expectEmit + call if you want both checked independently).
     }
 
     function testFundLicenseRevertsWhenCallerIsNotLicensee() public {
@@ -189,6 +221,25 @@ contract LicenseEscrowAgreementTest is Test {
 
         vm.prank(bob);
         licenseEscrow.fundLicense{value: wrongAmount}(agreementId);
+    }
+
+    /// @dev Regression test for the licensor/licensee consistency gap flagged in review:
+    ///      buyLicense() already re-checks asset ownership before settling; fundLicense()
+    ///      must do the same, or a licensor who sold the underlying IP Asset NFT after
+    ///      creating an agreement could still collect a license fee for it.
+    function testFundLicenseRevertsWhenLicensorNoLongerOwnsAsset() public {
+        uint256 assetId = _registerDefaultAsset(alice);
+
+        vm.prank(alice);
+        uint256 agreementId = licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
+
+        vm.prank(alice);
+        assetRegistry.transferFrom(alice, carol, assetId);
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.LicensorNoLongerAssetOwner.selector, assetId, alice));
+
+        vm.prank(bob);
+        licenseEscrow.fundLicense{value: LICENSE_FEE}(agreementId);
     }
 
     // ======================================================================
@@ -257,6 +308,13 @@ contract LicenseEscrowAgreementTest is Test {
         licenseEscrow.cancelAgreement(agreementId);
     }
 
+    function testCancelAgreementRevertsWhenAgreementDoesNotExist() public {
+        uint256 missingAgreementId = 999;
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.AgreementDoesNotExist.selector, missingAgreementId));
+        licenseEscrow.cancelAgreement(missingAgreementId);
+    }
+
     // ======================================================================
     // confirmPerformance: Funded -> Active, licensor only
     // ======================================================================
@@ -298,6 +356,13 @@ contract LicenseEscrowAgreementTest is Test {
         licenseEscrow.confirmPerformance(agreementId);
     }
 
+    function testConfirmPerformanceRevertsWhenAgreementDoesNotExist() public {
+        uint256 missingAgreementId = 999;
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.AgreementDoesNotExist.selector, missingAgreementId));
+        licenseEscrow.confirmPerformance(missingAgreementId);
+    }
+
     // ======================================================================
     // Rule 6: release() -> Completed, licensee only, pays licensor
     // ======================================================================
@@ -316,6 +381,19 @@ contract LicenseEscrowAgreementTest is Test {
         assertEq(uint8(agreement.status), uint8(LicenseEscrow.LicenseStatus.Completed));
         assertEq(agreement.escrowedAmount, 0);
         assertEq(alice.balance, aliceBalanceBefore + LICENSE_FEE);
+        assertEq(address(licenseEscrow).balance, 0);
+    }
+
+    /// @dev totalRevenueByAsset previously only tracked buyLicense() revenue despite its
+    ///      name — a settled escrow agreement is just as much "revenue" for the asset.
+    function testReleaseUpdatesTotalRevenueByAsset() public {
+        uint256 agreementId = _activeAgreement();
+        LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
+
+        vm.prank(bob);
+        licenseEscrow.release(agreementId);
+
+        assertEq(licenseEscrow.totalRevenueByAsset(agreement.assetId), LICENSE_FEE);
     }
 
     function testReleaseRevertsWhenCallerIsNotLicensee() public {
@@ -340,6 +418,44 @@ contract LicenseEscrowAgreementTest is Test {
 
         vm.prank(bob);
         licenseEscrow.release(agreementId);
+    }
+
+    function testReleaseRevertsWhenAgreementDoesNotExist() public {
+        uint256 missingAgreementId = 999;
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.AgreementDoesNotExist.selector, missingAgreementId));
+        licenseEscrow.release(missingAgreementId);
+    }
+
+    /// @dev Push-payment DoS check: if the licensor is a contract that rejects plain ETH
+    ///      transfers, release() must revert cleanly and leave state untouched (still Active,
+    ///      escrow still funded) rather than silently burning the funds or leaving the
+    ///      agreement stuck half-transitioned.
+    function testReleaseRevertsAndRollsBackWhenLicensorRejectsETH() public {
+        RejectingReceiver rejectingLicensor = new RejectingReceiver();
+
+        uint256 assetId = _registerDefaultAsset(address(rejectingLicensor));
+
+        vm.prank(address(rejectingLicensor));
+        uint256 agreementId =
+            licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
+
+        vm.prank(bob);
+        licenseEscrow.fundLicense{value: LICENSE_FEE}(agreementId);
+
+        vm.prank(address(rejectingLicensor));
+        licenseEscrow.confirmPerformance(agreementId);
+
+        uint256 contractBalanceBefore = address(licenseEscrow).balance;
+
+        vm.expectRevert(LicenseEscrow.PaymentTransferFailed.selector);
+        vm.prank(bob);
+        licenseEscrow.release(agreementId);
+
+        LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
+        assertEq(uint8(agreement.status), uint8(LicenseEscrow.LicenseStatus.Active));
+        assertEq(agreement.escrowedAmount, LICENSE_FEE);
+        assertEq(address(licenseEscrow).balance, contractBalanceBefore);
     }
 
     // ======================================================================
@@ -393,9 +509,16 @@ contract LicenseEscrowAgreementTest is Test {
         licenseEscrow.raiseDispute(agreementId);
     }
 
-    /// @dev This is the regression test for the bug caught during implementation:
-    ///      release() must NOT succeed while Disputed, even though Disputed -> Completed
-    ///      is a topologically valid edge (it's resolveDispute()'s edge, not release()'s).
+    function testRaiseDisputeRevertsWhenAgreementDoesNotExist() public {
+        uint256 missingAgreementId = 999;
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.AgreementDoesNotExist.selector, missingAgreementId));
+        licenseEscrow.raiseDispute(missingAgreementId);
+    }
+
+    /// @dev Regression test for the bug caught during implementation: release() must NOT
+    ///      succeed while Disputed, even though Disputed -> Completed is a topologically
+    ///      valid edge (it's resolveDispute()'s edge, not release()'s).
     function testReleaseRevertsWhileDisputed() public {
         uint256 agreementId = _activeAgreement();
 
@@ -434,6 +557,16 @@ contract LicenseEscrowAgreementTest is Test {
         assertEq(alice.balance, aliceBalanceBefore + LICENSE_FEE);
     }
 
+    function testResolveDisputePayToLicensorUpdatesTotalRevenueByAsset() public {
+        uint256 agreementId = _disputedAgreement();
+        LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
+
+        vm.prank(dave);
+        licenseEscrow.resolveDispute(agreementId, true);
+
+        assertEq(licenseEscrow.totalRevenueByAsset(agreement.assetId), LICENSE_FEE);
+    }
+
     function testResolveDisputeRefundsLicenseeWhenFalse() public {
         uint256 agreementId = _disputedAgreement();
         uint256 bobBalanceBefore = bob.balance;
@@ -447,10 +580,22 @@ contract LicenseEscrowAgreementTest is Test {
         assertEq(bob.balance, bobBalanceBefore + LICENSE_FEE);
     }
 
+    /// @dev A refund is money going back to the licensee, not realized revenue — must NOT
+    ///      be counted in totalRevenueByAsset (paired with the payToLicensor=true case above).
+    function testResolveDisputeRefundDoesNotUpdateTotalRevenueByAsset() public {
+        uint256 agreementId = _disputedAgreement();
+        LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
+
+        vm.prank(dave);
+        licenseEscrow.resolveDispute(agreementId, false);
+
+        assertEq(licenseEscrow.totalRevenueByAsset(agreement.assetId), 0);
+    }
+
     function testResolveDisputeRevertsWhenCallerIsNotArbiter() public {
         uint256 agreementId = _disputedAgreement();
 
-        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotArbiter.selector, alice));
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotArbiter.selector, agreementId, alice));
 
         vm.prank(alice);
         licenseEscrow.resolveDispute(agreementId, true);
@@ -474,6 +619,78 @@ contract LicenseEscrowAgreementTest is Test {
         licenseEscrow.resolveDispute(agreementId, true);
     }
 
+    function testResolveDisputeRevertsWhenAgreementDoesNotExist() public {
+        uint256 missingAgreementId = 999;
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.AgreementDoesNotExist.selector, missingAgreementId));
+        vm.prank(dave);
+        licenseEscrow.resolveDispute(missingAgreementId, true);
+    }
+
+    /// @dev Push-payment DoS check on the refund path: if the licensee is a contract that
+    ///      rejects plain ETH transfers, resolveDispute() must revert cleanly and leave the
+    ///      agreement Disputed with the escrow still intact, not silently lose the funds.
+    function testResolveDisputeRevertsAndRollsBackWhenLicenseeRejectsETH() public {
+        RejectingReceiver rejectingLicensee = new RejectingReceiver();
+        vm.deal(address(rejectingLicensee), 10 ether);
+
+        uint256 assetId = _registerDefaultAsset(alice);
+
+        vm.prank(alice);
+        uint256 agreementId = licenseEscrow.createLicenseAgreement(
+            assetId, address(rejectingLicensee), LICENSE_FEE, TERMS_HASH, TERMS_URI
+        );
+
+        vm.prank(address(rejectingLicensee));
+        licenseEscrow.fundLicense{value: LICENSE_FEE}(agreementId);
+
+        vm.prank(address(rejectingLicensee));
+        licenseEscrow.raiseDispute(agreementId);
+
+        uint256 contractBalanceBefore = address(licenseEscrow).balance;
+
+        vm.expectRevert(LicenseEscrow.PaymentTransferFailed.selector);
+        vm.prank(dave);
+        licenseEscrow.resolveDispute(agreementId, false);
+
+        LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
+        assertEq(uint8(agreement.status), uint8(LicenseEscrow.LicenseStatus.Disputed));
+        assertEq(agreement.escrowedAmount, LICENSE_FEE);
+        assertEq(address(licenseEscrow).balance, contractBalanceBefore);
+    }
+
+    // ======================================================================
+    // Arbiter snapshot: changing the global default must not affect existing agreements
+    // ======================================================================
+
+    /// @dev Regression test for the trust-model issue flagged in review: the contract owner
+    ///      reassigning the global arbiter must only affect agreements created afterwards.
+    ///      An agreement already funded (and possibly disputed) keeps the arbiter it was
+    ///      created with — otherwise an owner could swap in a favorable arbiter mid-dispute.
+    function testArbiterChangeDoesNotAffectExistingAgreements() public {
+        uint256 oldAgreementId = _disputedAgreement(); // created while arbiter == dave
+
+        address eve = makeAddr("eve");
+        licenseEscrow.setArbiter(eve); // owner reassigns the global default
+
+        // The old agreement still only trusts dave.
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotArbiter.selector, oldAgreementId, eve));
+        vm.prank(eve);
+        licenseEscrow.resolveDispute(oldAgreementId, true);
+
+        vm.prank(dave);
+        licenseEscrow.resolveDispute(oldAgreementId, true); // dave can still resolve it
+
+        // A new agreement created after the reassignment picks up the new default.
+        uint256 newAssetId = _registerDefaultAsset(alice);
+        vm.prank(alice);
+        uint256 newAgreementId =
+            licenseEscrow.createLicenseAgreement(newAssetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
+
+        LicenseEscrow.LicenseAgreement memory newAgreement = licenseEscrow.getAgreement(newAgreementId);
+        assertEq(newAgreement.arbiter, eve);
+    }
+
     // ======================================================================
     // Rule 10: terminal states reject any further transition
     // ======================================================================
@@ -495,6 +712,25 @@ contract LicenseEscrowAgreementTest is Test {
         licenseEscrow.raiseDispute(agreementId);
     }
 
+    /// @dev Fulfils the TODO from the previous round: Refunded is a terminal state too, and
+    ///      needs the same "nothing further can happen" coverage as Completed and Cancelled.
+    function testRefundedAgreementRejectsFurtherActions() public {
+        uint256 agreementId = _disputedAgreement();
+
+        vm.prank(dave);
+        licenseEscrow.resolveDispute(agreementId, false);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LicenseEscrow.InvalidStatusTransition.selector,
+                LicenseEscrow.LicenseStatus.Refunded,
+                LicenseEscrow.LicenseStatus.Completed
+            )
+        );
+        vm.prank(dave);
+        licenseEscrow.resolveDispute(agreementId, true);
+    }
+
     function testCancelledAgreementRejectsFunding() public {
         uint256 agreementId = _createDefaultAgreement();
 
@@ -512,10 +748,6 @@ contract LicenseEscrowAgreementTest is Test {
         licenseEscrow.fundLicense{value: LICENSE_FEE}(agreementId);
     }
 
-    // TODO: testRefundedAgreementRejectsFurtherActions — same pattern as
-    // testCompletedAgreementRejectsFurtherActions but starting from _disputedAgreement()
-    // + resolveDispute(id, false), then assert any further call reverts.
-
     // ======================================================================
     // Arbiter admin
     // ======================================================================
@@ -530,8 +762,10 @@ contract LicenseEscrowAgreementTest is Test {
         assertEq(licenseEscrow.arbiter(), newArbiter);
     }
 
+    /// @dev Uses the precise OpenZeppelin v5 Ownable error instead of a bare vm.expectRevert(),
+    ///      which would also (incorrectly) pass if the call reverted for an unrelated reason.
     function testSetArbiterRevertsWhenCallerIsNotOwner() public {
-        vm.expectRevert(); // Ownable's own custom error; not re-declared on LicenseEscrow
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         vm.prank(alice);
         licenseEscrow.setArbiter(alice);
     }
@@ -572,7 +806,7 @@ contract LicenseEscrowAgreementTest is Test {
         uint256 assetId = _registerDefaultAsset(alice);
 
         vm.prank(alice);
-        agreementId = licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE);
+        agreementId = licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
     }
 
     function _fundedAgreement() private returns (uint256 agreementId) {
@@ -594,5 +828,13 @@ contract LicenseEscrowAgreementTest is Test {
 
         vm.prank(bob);
         licenseEscrow.raiseDispute(agreementId);
+    }
+}
+
+/// @dev Minimal contract that rejects any plain ETH transfer, used to test that push-payment
+///      failures in release()/resolveDispute() revert cleanly instead of corrupting state.
+contract RejectingReceiver {
+    receive() external payable {
+        revert("RejectingReceiver: no thanks");
     }
 }
