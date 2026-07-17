@@ -228,6 +228,9 @@ It supports:
 - buying a license certificate NFT;
 - reading back onchain asset, evidence, license offer, license certificate, and revenue state.
 
+Frontend currently covers the v0.1 direct offer flow and read dashboard. 
+The new escrow agreement flow is covered by Foundry tests and can be added to the frontend later.
+
 ### Read Dashboard
 
 The frontend includes a Read Dashboard for local demo verification.
