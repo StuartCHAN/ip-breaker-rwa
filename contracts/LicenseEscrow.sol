@@ -50,6 +50,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         Completed, // 资金已释放给权利人（正常放款或仲裁裁决支持权利人）
         Refunded, // 资金已退还被许可方（仲裁裁决支持被许可方）
         Cancelled // 付款前被权利人取消
+
     }
 
     /// @dev v0.1 KNOWN LIMITATION: there are no funding/performance/acceptance deadlines.
@@ -364,9 +365,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
             fundedAt: 0
         });
 
-        emit LicenseAgreementCreated(
-            agreementId, assetId, msg.sender, licensee, arbiter, licenseFee, termsHash, termsURI
-        );
+        emit LicenseAgreementCreated(agreementId, assetId, msg.sender, licensee, arbiter, licenseFee, termsHash, termsURI);
     }
 
     /// @notice Licensee pays the agreed license fee into escrow.
@@ -386,7 +385,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
             revert LicensorNoLongerAssetOwner(agreement.assetId, agreement.licensor);
         }
 
-        _transition(agreementId, agreement, LicenseStatus.Funded);
+        _transition(agreementId, agreement, LicenseStatus.Created, LicenseStatus.Funded);
 
         agreement.escrowedAmount = msg.value;
         agreement.fundedAt = uint64(block.timestamp);
@@ -400,25 +399,22 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
 
         if (msg.sender != agreement.licensor) revert NotLicensor(agreementId, msg.sender);
 
-        _transition(agreementId, agreement, LicenseStatus.Active);
+        _transition(agreementId, agreement, LicenseStatus.Funded, LicenseStatus.Active);
 
         emit PerformanceConfirmed(agreementId, msg.sender);
     }
 
     /// @notice Licensee accepts performance and releases escrowed funds to the licensor.
-    /// @dev Completed is also reachable from Disputed via resolveDispute(), so the shared
-    ///      transition graph alone can't tell these two paths apart. This explicit check is
-    ///      what actually enforces rule 7 (no release while Disputed) — _isValidTransition
-    ///      is a topology check, not a "who's allowed to fire from where right now" check.
+    /// @dev Completed is also reachable from Disputed via resolveDispute(); passing
+    ///      LicenseStatus.Active as expectedFrom to _transition() is what enforces rule 7
+    ///      (no release while Disputed) — the graph alone can't tell these two edges apart,
+    ///      since Active -> Completed and Disputed -> Completed are both topologically legal.
     function release(uint256 agreementId) external nonReentrant {
         LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
 
         if (msg.sender != agreement.licensee) revert NotLicensee(agreementId, msg.sender);
-        if (agreement.status != LicenseStatus.Active) {
-            revert InvalidStatusTransition(agreement.status, LicenseStatus.Completed);
-        }
 
-        _transition(agreementId, agreement, LicenseStatus.Completed);
+        _transition(agreementId, agreement, LicenseStatus.Active, LicenseStatus.Completed);
 
         uint256 amount = agreement.escrowedAmount;
         agreement.escrowedAmount = 0;
@@ -431,6 +427,13 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     }
 
     /// @notice Either party raises a dispute from Funded or Active, freezing the escrow.
+    /// @dev Unlike release()/resolveDispute(), Disputed has no shared-destination ambiguity
+    ///      to resolve — Funded and Active are both legitimate starting points for a dispute,
+    ///      and nothing else can produce a Disputed status. So expectedFrom here is just the
+    ///      agreement's current status (the check is trivially true); the real gate is still
+    ///      _isValidTransition(current, Disputed) inside _transition(), which accepts Funded
+    ///      or Active and rejects everything else (Created, Disputed itself, and all
+    ///      terminal states).
     function raiseDispute(uint256 agreementId) external {
         LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
 
@@ -438,28 +441,28 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
             revert NotLicensorOrLicensee(agreementId, msg.sender);
         }
 
-        _transition(agreementId, agreement, LicenseStatus.Disputed);
+        _transition(agreementId, agreement, agreement.status, LicenseStatus.Disputed);
 
         emit DisputeRaised(agreementId, msg.sender);
     }
 
     /// @notice Arbiter resolves a dispute, paying either the licensor or the licensee.
-    /// @dev Mirrors the explicit check in release(): Completed is reachable from both Active
-    ///      and Disputed in the shared graph, so we pin the required starting state here too —
-    ///      otherwise an arbiter could force-complete an agreement that was never disputed.
+    /// @dev Completed is also reachable from Active via release(); passing
+    ///      LicenseStatus.Disputed as expectedFrom to _transition() is what stops an arbiter
+    ///      from force-completing an agreement that was never disputed.
     ///      Checks against agreement.arbiter (snapshotted at creation), not the current global
     ///      arbiter — see createLicenseAgreement's NatSpec for why.
     function resolveDispute(uint256 agreementId, bool payToLicensor) external nonReentrant {
         LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
 
         if (msg.sender != agreement.arbiter) revert NotArbiter(agreementId, msg.sender);
-        if (agreement.status != LicenseStatus.Disputed) {
-            revert InvalidStatusTransition(
-                agreement.status, payToLicensor ? LicenseStatus.Completed : LicenseStatus.Refunded
-            );
-        }
 
-        _transition(agreementId, agreement, payToLicensor ? LicenseStatus.Completed : LicenseStatus.Refunded);
+        _transition(
+            agreementId,
+            agreement,
+            LicenseStatus.Disputed,
+            payToLicensor ? LicenseStatus.Completed : LicenseStatus.Refunded
+        );
 
         uint256 amount = agreement.escrowedAmount;
         agreement.escrowedAmount = 0;
@@ -484,7 +487,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
 
         if (msg.sender != agreement.licensor) revert NotLicensor(agreementId, msg.sender);
 
-        _transition(agreementId, agreement, LicenseStatus.Cancelled);
+        _transition(agreementId, agreement, LicenseStatus.Created, LicenseStatus.Cancelled);
 
         emit AgreementCancelled(agreementId);
     }
@@ -544,15 +547,28 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         agreement = agreements[agreementId];
     }
 
-    /// @dev Single choke point for every agreement status change: validates the edge against
-    ///      the state graph, writes the new status, and emits LicenseStatusChanged. Every
-    ///      external function that moves an agreement forward goes through this — so every
-    ///      legal transition is logged (rule 9) and every illegal one reverts here (rule 10)
-    ///      instead of each function re-implementing its own status checks.
-    function _transition(uint256 agreementId, LicenseAgreement storage agreement, LicenseStatus to) internal {
+    /// @dev Single choke point for every agreement status change: validates BOTH that the
+    ///      agreement is currently in `expectedFrom` AND that expectedFrom -> to is a legal
+    ///      edge in the state graph, then writes the new status and emits
+    ///      LicenseStatusChanged. Requiring the caller to name its expected starting state
+    ///      (rather than only checking graph topology) is what closes the ambiguity around
+    ///      shared destination states like Completed (reachable from both Active via
+    ///      release() and Disputed via resolveDispute()) — each call site now states its own
+    ///      precondition explicitly instead of relying on a shared graph that can't tell two
+    ///      different functions' edges apart. Every external function that moves an agreement
+    ///      forward goes through this, so every legal transition is logged (rule 9) and every
+    ///      illegal one — including "right edge, wrong function" — reverts here (rule 10).
+    function _transition(
+        uint256 agreementId,
+        LicenseAgreement storage agreement,
+        LicenseStatus expectedFrom,
+        LicenseStatus to
+    ) internal {
         LicenseStatus from = agreement.status;
 
-        if (!_isValidTransition(from, to)) revert InvalidStatusTransition(from, to);
+        if (from != expectedFrom || !_isValidTransition(from, to)) {
+            revert InvalidStatusTransition(from, to);
+        }
 
         agreement.status = to;
 
