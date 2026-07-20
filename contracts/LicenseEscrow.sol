@@ -50,7 +50,6 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         Completed, // 资金已释放给权利人（正常放款或仲裁裁决支持权利人）
         Refunded, // 资金已退还被许可方（仲裁裁决支持被许可方）
         Cancelled // 付款前被权利人取消
-
     }
 
     /// @dev v0.1 KNOWN LIMITATION: there are no funding/performance/acceptance deadlines.
@@ -365,7 +364,9 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
             fundedAt: 0
         });
 
-        emit LicenseAgreementCreated(agreementId, assetId, msg.sender, licensee, arbiter, licenseFee, termsHash, termsURI);
+        emit LicenseAgreementCreated(
+            agreementId, assetId, msg.sender, licensee, arbiter, licenseFee, termsHash, termsURI
+        );
     }
 
     /// @notice Licensee pays the agreed license fee into escrow.

@@ -47,8 +47,7 @@ contract LicenseEscrowSecurityTest is Test {
         uint256 assetId = assetRegistry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
 
         vm.prank(address(attacker));
-        uint256 agreementId =
-            licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
+        uint256 agreementId = licenseEscrow.createLicenseAgreement(assetId, bob, LICENSE_FEE, TERMS_HASH, TERMS_URI);
 
         vm.prank(bob);
         licenseEscrow.fundLicense{value: LICENSE_FEE}(agreementId);
@@ -169,8 +168,9 @@ contract ReentrantAttacker is IERC721Receiver {
         _armed = false; // disarm so the payment itself isn't re-triggered recursively
 
         try target.release(_agreementIdToReenterOn) {
-            // If this succeeds, the reentrancy guard failed to do its job.
-        } catch {
+        // If this succeeds, the reentrancy guard failed to do its job.
+        }
+        catch {
             reentrantCallReverted = true;
         }
     }
