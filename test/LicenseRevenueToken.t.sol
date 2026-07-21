@@ -7,11 +7,13 @@ import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseRevenueToken} from "../contracts/LicenseRevenueToken.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 import {MockInvestorEligibility} from "./mocks/MockInvestorEligibility.sol";
+import {MockRevenueVault} from "./mocks/MockRevenueVault.sol";
 
 contract LicenseRevenueTokenTest is Test {
     IPAssetRegistry private assetRegistry;
     MockInvestorEligibility private eligibility;
     LicenseRevenueToken private token;
+    MockRevenueVault private revenueVault;
 
     address private controller = makeAddr("controller");
     address private minter = makeAddr("minter");
@@ -43,6 +45,9 @@ contract LicenseRevenueTokenTest is Test {
 
         eligibility = new MockInvestorEligibility();
         token = _deployToken(assetId, FINAL_SUPPLY, address(eligibility), controller);
+        revenueVault = new MockRevenueVault(address(token));
+        vm.prank(controller);
+        token.bindRevenueVault(address(revenueVault));
     }
 
     function testImmutableBindingAndInitialLifecycle() public view {
@@ -55,6 +60,38 @@ contract LicenseRevenueTokenTest is Test {
         assertEq(token.decimals(), 18);
         assertEq(uint256(token.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Created));
         assertEq(token.totalSupply(), 0);
+        assertEq(address(token.revenueVault()), address(revenueVault));
+    }
+
+    function testRevenueVaultBindingIsOneTime() public {
+        MockRevenueVault replacement = new MockRevenueVault(address(token));
+
+        vm.prank(controller);
+        vm.expectRevert(
+            abi.encodeWithSelector(LicenseRevenueToken.RevenueVaultAlreadyBound.selector, address(revenueVault))
+        );
+        token.bindRevenueVault(address(replacement));
+    }
+
+    function testRevenueVaultMustBindBackToToken() public {
+        LicenseRevenueToken unbound = _deployToken(assetId, FINAL_SUPPLY, address(eligibility), controller);
+        MockRevenueVault wrongVault = new MockRevenueVault(address(token));
+
+        vm.prank(controller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LicenseRevenueToken.RevenueVaultTokenMismatch.selector, address(unbound), address(token)
+            )
+        );
+        unbound.bindRevenueVault(address(wrongVault));
+    }
+
+    function testCannotBeginMintingBeforeRevenueVaultBinding() public {
+        LicenseRevenueToken unbound = _deployToken(assetId, FINAL_SUPPLY, address(eligibility), controller);
+
+        vm.prank(controller);
+        vm.expectRevert(LicenseRevenueToken.RevenueVaultNotBound.selector);
+        unbound.beginMinting();
     }
 
     function testConstructorRejectsMissingAsset() public {
@@ -127,6 +164,7 @@ contract LicenseRevenueTokenTest is Test {
 
         assertEq(token.balanceOf(alice), FINAL_SUPPLY);
         assertEq(token.totalSupply(), FINAL_SUPPLY);
+        assertEq(revenueVault.checkpointCount(), 1);
     }
 
     function testMintCannotExceedFinalSupply() public {
@@ -208,6 +246,21 @@ contract LicenseRevenueTokenTest is Test {
         assertEq(token.balanceOf(alice), FINAL_SUPPLY - 100 ether);
         assertEq(token.balanceOf(bob), 100 ether);
         assertEq(token.totalSupply(), FINAL_SUPPLY);
+        assertEq(revenueVault.checkpointCount(), 2);
+    }
+
+    function testCheckpointFailureRollsBackTransfer() public {
+        _activateWithAliceHoldingFinalSupply();
+        eligibility.setEligible(assetId, bob, true);
+        revenueVault.setCheckpointShouldRevert(true);
+
+        vm.prank(alice);
+        vm.expectRevert(MockRevenueVault.CheckpointFailed.selector);
+        token.transfer(bob, 100 ether);
+
+        assertEq(token.balanceOf(alice), FINAL_SUPPLY);
+        assertEq(token.balanceOf(bob), 0);
+        assertEq(revenueVault.checkpointCount(), 1);
     }
 
     function testTransferToIneligibleReceiverRejected() public {
@@ -243,6 +296,7 @@ contract LicenseRevenueTokenTest is Test {
         assertEq(token.balanceOf(alice), FINAL_SUPPLY - amount);
         assertEq(token.balanceOf(bob), amount);
         assertEq(token.totalSupply(), FINAL_SUPPLY);
+        assertEq(revenueVault.checkpointCount(), 2);
     }
 
     function testUnauthorizedRecoveryRejected() public {

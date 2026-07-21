@@ -6,6 +6,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 import {IInvestorEligibility} from "./interfaces/IInvestorEligibility.sol";
+import {IRevenueVault} from "./interfaces/IRevenueVault.sol";
 
 /// @title LicenseRevenueToken
 /// @notice Compliance-restricted revenue participation units for one registered IP asset.
@@ -28,6 +29,10 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     uint256 public immutable finalSupply;
 
     Lifecycle public lifecycle;
+    IRevenueVault public revenueVault;
+
+    bool private _recoveryInProgress;
+    bool private _checkpointInProgress;
 
     error ZeroIPAssetRegistry();
     error ZeroEligibilityPolicy();
@@ -41,9 +46,15 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     error TransfersNotActive();
     error ArbitraryBurnDisabled();
     error InvalidRecoveryAccount(address account);
+    error ZeroRevenueVault();
+    error RevenueVaultAlreadyBound(address vault);
+    error RevenueVaultNotBound();
+    error RevenueVaultTokenMismatch(address expectedToken, address actualToken);
+    error ReentrantCheckpoint();
 
     event LifecycleChanged(Lifecycle indexed previousLifecycle, Lifecycle indexed newLifecycle);
     event TokensRecovered(address indexed from, address indexed to, uint256 amount, address indexed controller);
+    event RevenueVaultBound(address indexed vault);
 
     constructor(
         string memory name_,
@@ -72,9 +83,26 @@ contract LicenseRevenueToken is ERC20, AccessControl {
         _setRoleAdmin(MINTER_ROLE, TOKEN_CONTROLLER_ROLE);
     }
 
+    /// @notice Permanently binds the token to its reward-accounting vault before allocation.
+    function bindRevenueVault(address vault_) external onlyRole(TOKEN_CONTROLLER_ROLE) {
+        if (lifecycle != Lifecycle.Created) revert InvalidLifecycle(lifecycle, Lifecycle.Created);
+        if (vault_ == address(0)) revert ZeroRevenueVault();
+
+        address currentVault = address(revenueVault);
+        if (currentVault != address(0)) revert RevenueVaultAlreadyBound(currentVault);
+
+        IRevenueVault candidate = IRevenueVault(vault_);
+        address boundToken = address(candidate.revenueToken());
+        if (boundToken != address(this)) revert RevenueVaultTokenMismatch(address(this), boundToken);
+
+        revenueVault = candidate;
+        emit RevenueVaultBound(vault_);
+    }
+
     /// @notice Opens the one-time allocation phase.
     function beginMinting() external onlyRole(TOKEN_CONTROLLER_ROLE) {
         if (lifecycle != Lifecycle.Created) revert InvalidLifecycle(lifecycle, Lifecycle.Created);
+        if (address(revenueVault) == address(0)) revert RevenueVaultNotBound();
         _setLifecycle(Lifecycle.Minting);
     }
 
@@ -108,27 +136,37 @@ contract LicenseRevenueToken is ERC20, AccessControl {
 
         uint256 supplyBefore = totalSupply();
 
-        // Deliberately bypasses ordinary sender eligibility and transfer-state checks.
-        // Receiver eligibility and controller authority are checked above.
-        super._update(from, to, amount);
+        // Recovery uses the same checkpointed balance path but does not migrate the
+        // source account's historical pending reward in Phase 3.1-B2-A.
+        _recoveryInProgress = true;
+        _update(from, to, amount);
+        _recoveryInProgress = false;
 
         assert(totalSupply() == supplyBefore);
         emit TokensRecovered(from, to, amount, msg.sender);
     }
 
-    /// @dev Single extension point for mint and ordinary token movements. Phase 3.1-A2 adds
-    ///      RevenueVault checkpoints here before `super._update`.
+    /// @dev Single extension point for every token balance movement. The vault settles
+    ///      pre-update rewards and records debt for projected post-update balances.
     function _update(address from, address to, uint256 value) internal override {
         if (from == address(0)) {
             if (lifecycle != Lifecycle.Minting) revert InvalidLifecycle(lifecycle, Lifecycle.Minting);
             if (!_canHold(to)) revert IneligibleInvestor(to);
         } else if (to == address(0)) {
             revert ArbitraryBurnDisabled();
-        } else {
+        } else if (!_recoveryInProgress) {
             if (lifecycle != Lifecycle.Activated) revert TransfersNotActive();
             if (!_canHold(from)) revert IneligibleInvestor(from);
             if (!_canHold(to)) revert IneligibleInvestor(to);
         }
+
+        IRevenueVault vault = revenueVault;
+        if (address(vault) == address(0)) revert RevenueVaultNotBound();
+
+        if (_checkpointInProgress) revert ReentrantCheckpoint();
+        _checkpointInProgress = true;
+        vault.checkpointTransfer(from, to, value);
+        _checkpointInProgress = false;
 
         super._update(from, to, value);
     }

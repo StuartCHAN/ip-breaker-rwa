@@ -7,17 +7,18 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+import {IRevenueVault} from "./interfaces/IRevenueVault.sol";
+
 /// @title RevenueVault
 /// @notice Holds and distributes one ERC-20 settlement asset to holders of one revenue token.
-/// @dev Phase 3.1-B1 assumes revenue-token balances remain unchanged while revenue is active.
-///      Transfer checkpoints and recovery-ledger migration are intentionally deferred.
-contract RevenueVault is AccessControl, ReentrancyGuard {
+/// @dev Recovery-ledger migration remains intentionally deferred after Phase 3.1-B2-A.
+contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
     using SafeERC20 for IERC20;
 
     bytes32 public constant REVENUE_DEPOSITOR_ROLE = keccak256("REVENUE_DEPOSITOR");
     uint256 public constant ACCUMULATOR_PRECISION = 1e27;
 
-    IERC20 public immutable revenueToken;
+    IERC20 public immutable override revenueToken;
     IERC20 public immutable settlementToken;
 
     uint256 public accumulatedRewardPerShare;
@@ -39,11 +40,14 @@ contract RevenueVault is AccessControl, ReentrancyGuard {
     error MissingTransferCheckpoint(address account, uint256 accumulated, uint256 debt);
     error ClaimsExceedDeposits(uint256 claimed, uint256 deposited);
     error VaultInsolvent(uint256 actualBalance, uint256 accountedBalance);
+    error OnlyRevenueToken(address caller);
+    error InsufficientCheckpointBalance(address account, uint256 balance, uint256 amount);
 
     event RevenueDeposited(
         address indexed depositor, uint256 amount, uint256 accumulatedRewardPerShare, uint256 precisionRemainder
     );
     event RevenueClaimed(address indexed account, uint256 amount, uint256 totalClaimed);
+    event TransferCheckpointed(address indexed from, address indexed to, uint256 amount);
 
     constructor(address revenueToken_, address settlementToken_, address admin_, address depositor_) {
         if (revenueToken_ == address(0)) revert ZeroRevenueToken();
@@ -81,6 +85,38 @@ contract RevenueVault is AccessControl, ReentrancyGuard {
         emit RevenueDeposited(msg.sender, amount, accumulatedRewardPerShare, newRemainder);
     }
 
+    /// @inheritdoc IRevenueVault
+    function checkpointTransfer(address from, address to, uint256 amount) external nonReentrant {
+        if (msg.sender != address(revenueToken)) revert OnlyRevenueToken(msg.sender);
+
+        if (from == to) {
+            if (from != address(0)) {
+                uint256 balance = revenueToken.balanceOf(from);
+                _accrueWithBalance(from, balance);
+                rewardDebt[from] = _accumulatedFor(balance);
+            }
+
+            emit TransferCheckpointed(from, to, amount);
+            return;
+        }
+
+        if (from != address(0)) {
+            uint256 fromBalance = revenueToken.balanceOf(from);
+            if (fromBalance < amount) revert InsufficientCheckpointBalance(from, fromBalance, amount);
+
+            _accrueWithBalance(from, fromBalance);
+            rewardDebt[from] = _accumulatedFor(fromBalance - amount);
+        }
+
+        if (to != address(0)) {
+            uint256 toBalance = revenueToken.balanceOf(to);
+            _accrueWithBalance(to, toBalance);
+            rewardDebt[to] = _accumulatedFor(toBalance + amount);
+        }
+
+        emit TransferCheckpointed(from, to, amount);
+    }
+
     /// @notice Pulls all revenue currently accrued to the caller.
     function claim() external nonReentrant returns (uint256 amount) {
         address account = msg.sender;
@@ -106,8 +142,7 @@ contract RevenueVault is AccessControl, ReentrancyGuard {
 
     /// @notice Returns the caller's stored and newly accrued unpaid revenue.
     function claimable(address account) external view returns (uint256) {
-        uint256 accumulated =
-            Math.mulDiv(revenueToken.balanceOf(account), accumulatedRewardPerShare, ACCUMULATOR_PRECISION);
+        uint256 accumulated = _accumulatedFor(revenueToken.balanceOf(account));
         uint256 debt = rewardDebt[account];
         if (accumulated < debt) revert MissingTransferCheckpoint(account, accumulated, debt);
 
@@ -120,13 +155,20 @@ contract RevenueVault is AccessControl, ReentrancyGuard {
     }
 
     function _accrue(address account) private {
-        uint256 accumulated =
-            Math.mulDiv(revenueToken.balanceOf(account), accumulatedRewardPerShare, ACCUMULATOR_PRECISION);
+        _accrueWithBalance(account, revenueToken.balanceOf(account));
+    }
+
+    function _accrueWithBalance(address account, uint256 balance) private {
+        uint256 accumulated = _accumulatedFor(balance);
         uint256 debt = rewardDebt[account];
         if (accumulated < debt) revert MissingTransferCheckpoint(account, accumulated, debt);
 
         pendingReward[account] += accumulated - debt;
         rewardDebt[account] = accumulated;
+    }
+
+    function _accumulatedFor(uint256 balance) private view returns (uint256) {
+        return Math.mulDiv(balance, accumulatedRewardPerShare, ACCUMULATOR_PRECISION);
     }
 
     function _calculateAccumulatorIncrement(uint256 amount, uint256 supply)
