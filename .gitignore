@@ -17,3 +17,6 @@ node_modules/
 .next/
 dist/
 build/
+
+# Hand-off
+docs/HANDOFF.md 
