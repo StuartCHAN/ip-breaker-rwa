@@ -9,5 +9,7 @@ interface IIdentityRegistry {
 
     function ROLE_VERIFIER() external view returns (uint256);
 
+    function ROLE_ARBITRATOR() external view returns (uint256);
+
     function hasBusinessRole(address account, uint256 roleMask) external view returns (bool);
 }

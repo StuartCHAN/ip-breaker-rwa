@@ -108,6 +108,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     error InvalidLicensee();
     error NotVerifiedLicensor(address licensor);
     error NotVerifiedLicensee(address licensee);
+    error NotVerifiedArbitrator(address arbitrator);
     error ZeroArbiter();
 
     // ============ Events: existing offer/license NFT flow ============
@@ -489,6 +490,11 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
 
         if (msg.sender != agreement.arbiter) revert NotArbiter(agreementId, msg.sender);
+
+        uint256 arbitratorRole = identityRegistry.ROLE_ARBITRATOR();
+        if (!identityRegistry.hasBusinessRole(msg.sender, arbitratorRole)) {
+            revert NotVerifiedArbitrator(msg.sender);
+        }
 
         _transition(
             agreementId,

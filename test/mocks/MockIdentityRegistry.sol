@@ -8,6 +8,7 @@ contract MockIdentityRegistry is IIdentityRegistry {
     uint256 public constant ROLE_ASSET_OWNER = 1 << 0;
     uint256 public constant ROLE_LICENSEE = 1 << 1;
     uint256 public constant ROLE_VERIFIER = 1 << 3;
+    uint256 public constant ROLE_ARBITRATOR = 1 << 4;
 
     function hasBusinessRole(address, uint256) external pure returns (bool) {
         return true;

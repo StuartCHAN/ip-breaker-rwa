@@ -16,6 +16,7 @@ contract LicenseEscrowIdentityTest is Test {
     address private licensor = makeAddr("licensor");
     address private licensee = makeAddr("licensee");
     address private newOwner = makeAddr("newOwner");
+    address private disputeArbiter = makeAddr("disputeArbiter");
 
     string private constant TITLE = "AI Patent Drafting Assistant";
     string private constant ASSET_TYPE = "SOFTWARE";
@@ -233,6 +234,86 @@ contract LicenseEscrowIdentityTest is Test {
         assertEq(address(licenseEscrow).balance, LICENSE_FEE);
     }
 
+    function testNonAssignedArbiterCannotResolveDispute() public {
+        uint256 agreementId = _createDisputedAgreement(true, 0);
+        address nonArbiter = makeAddr("nonArbiter");
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotArbiter.selector, agreementId, nonArbiter));
+        vm.prank(nonArbiter);
+        licenseEscrow.resolveDispute(agreementId, true);
+
+        _assertDisputedAgreementUnchanged(agreementId);
+    }
+
+    function testAssignedArbiterWithoutRoleCannotResolveDispute() public {
+        uint256 agreementId = _createDisputedAgreement(false, 0);
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotVerifiedArbitrator.selector, disputeArbiter));
+        vm.prank(disputeArbiter);
+        licenseEscrow.resolveDispute(agreementId, true);
+
+        _assertDisputedAgreementUnchanged(agreementId);
+    }
+
+    function testRevokedArbiterCannotResolveDispute() public {
+        uint256 agreementId = _createDisputedAgreement(true, 0);
+        identityRegistry.revokeIdentity(disputeArbiter, "arbitrator revoked");
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotVerifiedArbitrator.selector, disputeArbiter));
+        vm.prank(disputeArbiter);
+        licenseEscrow.resolveDispute(agreementId, true);
+
+        _assertDisputedAgreementUnchanged(agreementId);
+    }
+
+    function testExpiredArbiterCannotResolveDispute() public {
+        uint64 expiresAt = uint64(block.timestamp + 30 days);
+        uint256 agreementId = _createDisputedAgreement(true, expiresAt);
+        vm.warp(expiresAt);
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotVerifiedArbitrator.selector, disputeArbiter));
+        vm.prank(disputeArbiter);
+        licenseEscrow.resolveDispute(agreementId, true);
+
+        _assertDisputedAgreementUnchanged(agreementId);
+    }
+
+    function testValidArbiterCanResolveDispute() public {
+        uint256 agreementId = _createDisputedAgreement(true, 0);
+        uint256 licensorBalanceBefore = licensor.balance;
+
+        vm.prank(disputeArbiter);
+        licenseEscrow.resolveDispute(agreementId, true);
+
+        LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
+        assertEq(uint256(agreement.status), uint256(LicenseEscrow.LicenseStatus.Completed));
+        assertEq(agreement.escrowedAmount, 0);
+        assertEq(address(licenseEscrow).balance, 0);
+        assertEq(licensor.balance, licensorBalanceBefore + LICENSE_FEE);
+        assertEq(licenseEscrow.totalRevenueByAsset(agreement.assetId), LICENSE_FEE);
+    }
+
+    function testRejectedResolutionKeepsStateAndFundsUnchanged() public {
+        uint256 agreementId = _createDisputedAgreement(true, 0);
+        LicenseEscrow.LicenseAgreement memory beforeFailure = licenseEscrow.getAgreement(agreementId);
+        uint256 licensorBalanceBefore = licensor.balance;
+        uint256 licenseeBalanceBefore = licensee.balance;
+        identityRegistry.revokeIdentity(disputeArbiter, "arbitrator revoked");
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotVerifiedArbitrator.selector, disputeArbiter));
+        vm.prank(disputeArbiter);
+        licenseEscrow.resolveDispute(agreementId, false);
+
+        LicenseEscrow.LicenseAgreement memory afterFailure = licenseEscrow.getAgreement(agreementId);
+        assertEq(uint256(afterFailure.status), uint256(beforeFailure.status));
+        assertEq(afterFailure.escrowedAmount, beforeFailure.escrowedAmount);
+        assertEq(afterFailure.fundedAt, beforeFailure.fundedAt);
+        assertEq(address(licenseEscrow).balance, LICENSE_FEE);
+        assertEq(licensor.balance, licensorBalanceBefore);
+        assertEq(licensee.balance, licenseeBalanceBefore);
+        assertEq(licenseEscrow.totalRevenueByAsset(afterFailure.assetId), 0);
+    }
+
     function _verifyIdentity(address account, uint256 roles, uint64 expiresAt) private {
         vm.prank(account);
         identityRegistry.registerIdentity("ipfs://encrypted-kyc", roles);
@@ -270,6 +351,21 @@ contract LicenseEscrowIdentityTest is Test {
         licenseEscrow.fundLicense{value: LICENSE_FEE}(agreementId);
     }
 
+    function _createDisputedAgreement(bool verifyArbiter, uint64 arbiterExpiresAt)
+        private
+        returns (uint256 agreementId)
+    {
+        licenseEscrow.setArbiter(disputeArbiter);
+        if (verifyArbiter) {
+            _verifyIdentity(disputeArbiter, identityRegistry.ROLE_ARBITRATOR(), arbiterExpiresAt);
+        }
+
+        agreementId = _createFundedAgreement(0);
+
+        vm.prank(licensor);
+        licenseEscrow.raiseDispute(agreementId);
+    }
+
     function _assertAgreementUnchangedAfterFailedFunding(uint256 agreementId) private view {
         LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
         assertEq(uint256(agreement.status), uint256(LicenseEscrow.LicenseStatus.Created));
@@ -284,5 +380,15 @@ contract LicenseEscrowIdentityTest is Test {
         assertEq(agreement.escrowedAmount, LICENSE_FEE);
         assertGt(agreement.fundedAt, 0);
         assertEq(address(licenseEscrow).balance, LICENSE_FEE);
+    }
+
+    function _assertDisputedAgreementUnchanged(uint256 agreementId) private view {
+        LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
+        assertEq(uint256(agreement.status), uint256(LicenseEscrow.LicenseStatus.Disputed));
+        assertEq(agreement.arbiter, disputeArbiter);
+        assertEq(agreement.escrowedAmount, LICENSE_FEE);
+        assertGt(agreement.fundedAt, 0);
+        assertEq(address(licenseEscrow).balance, LICENSE_FEE);
+        assertEq(licenseEscrow.totalRevenueByAsset(agreement.assetId), 0);
     }
 }
