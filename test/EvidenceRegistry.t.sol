@@ -5,11 +5,12 @@ import {Test} from "forge-std/Test.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {EvidenceRegistry} from "../contracts/EvidenceRegistry.sol";
-import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
+import {IdentityRegistry} from "../contracts/IdentityRegistry.sol";
 
 contract EvidenceRegistryTest is Test {
     IPAssetRegistry private assetRegistry;
     EvidenceRegistry private evidenceRegistry;
+    IdentityRegistry private identityRegistry;
 
     address private alice = makeAddr("alice");
     address private bob = makeAddr("bob");
@@ -39,8 +40,6 @@ contract EvidenceRegistryTest is Test {
 
     bytes32 private constant ATTESTATION_UID = keccak256("mock-eas-attestation-uid");
 
-    event ReviewerUpdated(address indexed reviewer, bool approved);
-
     event EvidenceAdded(
         uint256 indexed assetId,
         uint256 indexed evidenceId,
@@ -51,44 +50,37 @@ contract EvidenceRegistryTest is Test {
         bytes32 attestationUID
     );
 
+    event EvidenceStatusChanged(
+        uint256 indexed evidenceId,
+        EvidenceRegistry.EvidenceStatus indexed previousStatus,
+        EvidenceRegistry.EvidenceStatus indexed newStatus,
+        address reviewedBy
+    );
+
     function setUp() public {
-        assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
-        evidenceRegistry = new EvidenceRegistry(address(assetRegistry));
+        identityRegistry = new IdentityRegistry();
+        identityRegistry.grantVerifierRole(address(this));
+        assetRegistry = new IPAssetRegistry(address(identityRegistry));
+        evidenceRegistry = new EvidenceRegistry(address(assetRegistry), address(identityRegistry));
+
+        _verifyIdentity(alice, identityRegistry.ROLE_ASSET_OWNER(), 0);
+        _verifyIdentity(bob, identityRegistry.ROLE_ASSET_OWNER(), 0);
+        _verifyIdentity(reviewer, identityRegistry.ROLE_VERIFIER(), 0);
     }
 
-    function testConstructorStoresAssetRegistry() public view {
+    function testConstructorStoresDependencies() public view {
         assertEq(address(evidenceRegistry.assetRegistry()), address(assetRegistry));
+        assertEq(address(evidenceRegistry.identityRegistry()), address(identityRegistry));
     }
 
     function testConstructorRevertsWhenAssetRegistryIsZero() public {
         vm.expectRevert(EvidenceRegistry.ZeroAssetRegistry.selector);
-        new EvidenceRegistry(address(0));
+        new EvidenceRegistry(address(0), address(identityRegistry));
     }
 
-    function testSetReviewerApprovesReviewer() public {
-        vm.expectEmit(true, false, false, true, address(evidenceRegistry));
-        emit ReviewerUpdated(reviewer, true);
-
-        evidenceRegistry.setReviewer(reviewer, true);
-
-        assertTrue(evidenceRegistry.reviewers(reviewer));
-    }
-
-    function testSetReviewerCanRemoveReviewer() public {
-        evidenceRegistry.setReviewer(reviewer, true);
-        assertTrue(evidenceRegistry.reviewers(reviewer));
-
-        vm.expectEmit(true, false, false, true, address(evidenceRegistry));
-        emit ReviewerUpdated(reviewer, false);
-
-        evidenceRegistry.setReviewer(reviewer, false);
-
-        assertFalse(evidenceRegistry.reviewers(reviewer));
-    }
-
-    function testSetReviewerRevertsWhenReviewerIsZero() public {
-        vm.expectRevert(EvidenceRegistry.ZeroReviewer.selector);
-        evidenceRegistry.setReviewer(address(0), true);
+    function testConstructorRevertsWhenIdentityRegistryIsZero() public {
+        vm.expectRevert(EvidenceRegistry.ZeroIdentityRegistry.selector);
+        new EvidenceRegistry(address(assetRegistry), address(0));
     }
 
     function testAssetOwnerCanAddOrdinaryEvidence() public {
@@ -109,6 +101,9 @@ contract EvidenceRegistryTest is Test {
         assertEq(evidence.attestationUID, bytes32(0));
         assertEq(evidence.submittedBy, alice);
         assertEq(evidence.submittedAt, block.timestamp);
+        assertEq(uint256(evidence.status), uint256(EvidenceRegistry.EvidenceStatus.Submitted));
+        assertEq(evidence.reviewedBy, address(0));
+        assertEq(evidence.reviewedAt, 0);
     }
 
     function testAddEvidenceStoresEvidenceIdUnderAsset() public {
@@ -130,12 +125,10 @@ contract EvidenceRegistryTest is Test {
         assertEq(evidenceIds[1], secondEvidenceId);
     }
 
-    function testReviewerCanAddFTOReport() public {
+    function testVerifiedAssetOwnerCanSubmitFTOReport() public {
         uint256 assetId = _registerDefaultAsset(alice);
 
-        evidenceRegistry.setReviewer(reviewer, true);
-
-        vm.prank(reviewer);
+        vm.prank(alice);
         uint256 evidenceId =
             evidenceRegistry.addEvidence(assetId, FTO_REPORT, FTO_REPORT_HASH, FTO_REPORT_URI, ATTESTATION_UID);
 
@@ -146,22 +139,117 @@ contract EvidenceRegistryTest is Test {
         assertEq(evidence.evidenceHash, FTO_REPORT_HASH);
         assertEq(evidence.evidenceURI, FTO_REPORT_URI);
         assertEq(evidence.attestationUID, ATTESTATION_UID);
-        assertEq(evidence.submittedBy, reviewer);
+        assertEq(evidence.submittedBy, alice);
     }
 
-    function testReviewerCanAddRiskReport() public {
-        uint256 assetId = _registerDefaultAsset(alice);
+    function testUnverifiedOwnerCannotSubmitEvidence() public {
+        address unverifiedOwner = makeAddr("unverifiedOwner");
+        _verifyIdentity(unverifiedOwner, identityRegistry.ROLE_ASSET_OWNER(), 0);
+        uint256 assetId = _registerDefaultAsset(unverifiedOwner);
+        identityRegistry.revokeIdentity(unverifiedOwner, "identity revoked");
 
-        evidenceRegistry.setReviewer(reviewer, true);
+        vm.expectRevert(abi.encodeWithSelector(EvidenceRegistry.NotVerifiedAssetOwner.selector, unverifiedOwner));
+        vm.prank(unverifiedOwner);
+        evidenceRegistry.addEvidence(assetId, GITHUB_COMMIT, GITHUB_EVIDENCE_HASH, GITHUB_EVIDENCE_URI, bytes32(0));
+    }
+
+    function testExpiredAssetOwnerCannotSubmitEvidence() public {
+        address expiredOwner = makeAddr("expiredOwner");
+        uint64 expiresAt = uint64(block.timestamp + 30 days);
+        _verifyIdentity(expiredOwner, identityRegistry.ROLE_ASSET_OWNER(), expiresAt);
+        uint256 assetId = _registerDefaultAsset(expiredOwner);
+        vm.warp(expiresAt);
+
+        vm.expectRevert(abi.encodeWithSelector(EvidenceRegistry.NotVerifiedAssetOwner.selector, expiredOwner));
+        vm.prank(expiredOwner);
+        evidenceRegistry.addEvidence(assetId, GITHUB_COMMIT, GITHUB_EVIDENCE_HASH, GITHUB_EVIDENCE_URI, bytes32(0));
+    }
+
+    function testNonVerifierCannotApproveEvidence() public {
+        uint256 assetId = _registerDefaultAsset(alice);
+        uint256 evidenceId = _addDefaultEvidence(assetId, alice);
+
+        vm.expectRevert(abi.encodeWithSelector(EvidenceRegistry.NotVerifiedVerifier.selector, bob));
+        vm.prank(bob);
+        evidenceRegistry.verifyEvidence(evidenceId);
+    }
+
+    function testVerifiedVerifierCanApproveEvidence() public {
+        uint256 assetId = _registerDefaultAsset(alice);
+        uint256 evidenceId = _addDefaultEvidence(assetId, alice);
+
+        vm.expectEmit(true, true, true, true, address(evidenceRegistry));
+        emit EvidenceStatusChanged(
+            evidenceId, EvidenceRegistry.EvidenceStatus.Submitted, EvidenceRegistry.EvidenceStatus.Verified, reviewer
+        );
 
         vm.prank(reviewer);
-        uint256 evidenceId =
-            evidenceRegistry.addEvidence(assetId, RISK_REPORT, RISK_REPORT_HASH, RISK_REPORT_URI, ATTESTATION_UID);
+        evidenceRegistry.verifyEvidence(evidenceId);
 
         EvidenceRegistry.Evidence memory evidence = evidenceRegistry.getEvidence(evidenceId);
+        assertEq(uint256(evidence.status), uint256(EvidenceRegistry.EvidenceStatus.Verified));
+        assertEq(evidence.reviewedBy, reviewer);
+        assertEq(evidence.reviewedAt, block.timestamp);
+    }
 
-        assertEq(evidence.evidenceType, RISK_REPORT);
-        assertEq(evidence.submittedBy, reviewer);
+    function testExpiredVerifierCannotApproveEvidence() public {
+        address expiredVerifier = makeAddr("expiredVerifier");
+        uint64 expiresAt = uint64(block.timestamp + 30 days);
+        _verifyIdentity(expiredVerifier, identityRegistry.ROLE_VERIFIER(), expiresAt);
+        uint256 evidenceId = _addDefaultEvidence(_registerDefaultAsset(alice), alice);
+        vm.warp(expiresAt);
+
+        vm.expectRevert(abi.encodeWithSelector(EvidenceRegistry.NotVerifiedVerifier.selector, expiredVerifier));
+        vm.prank(expiredVerifier);
+        evidenceRegistry.verifyEvidence(evidenceId);
+    }
+
+    function testRevokedVerifierCannotApproveEvidence() public {
+        uint256 evidenceId = _addDefaultEvidence(_registerDefaultAsset(alice), alice);
+        identityRegistry.revokeIdentity(reviewer, "verifier revoked");
+
+        vm.expectRevert(abi.encodeWithSelector(EvidenceRegistry.NotVerifiedVerifier.selector, reviewer));
+        vm.prank(reviewer);
+        evidenceRegistry.verifyEvidence(evidenceId);
+    }
+
+    function testVerifierCanRejectSubmittedEvidence() public {
+        uint256 evidenceId = _addDefaultEvidence(_registerDefaultAsset(alice), alice);
+
+        vm.prank(reviewer);
+        evidenceRegistry.rejectEvidence(evidenceId);
+
+        EvidenceRegistry.Evidence memory evidence = evidenceRegistry.getEvidence(evidenceId);
+        assertEq(uint256(evidence.status), uint256(EvidenceRegistry.EvidenceStatus.Rejected));
+    }
+
+    function testVerifierCanRevokeVerifiedEvidence() public {
+        uint256 evidenceId = _addDefaultEvidence(_registerDefaultAsset(alice), alice);
+
+        vm.startPrank(reviewer);
+        evidenceRegistry.verifyEvidence(evidenceId);
+        evidenceRegistry.revokeEvidence(evidenceId);
+        vm.stopPrank();
+
+        EvidenceRegistry.Evidence memory evidence = evidenceRegistry.getEvidence(evidenceId);
+        assertEq(uint256(evidence.status), uint256(EvidenceRegistry.EvidenceStatus.Revoked));
+    }
+
+    function testCannotApproveEvidenceTwice() public {
+        uint256 evidenceId = _addDefaultEvidence(_registerDefaultAsset(alice), alice);
+
+        vm.startPrank(reviewer);
+        evidenceRegistry.verifyEvidence(evidenceId);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EvidenceRegistry.InvalidEvidenceStatus.selector,
+                evidenceId,
+                EvidenceRegistry.EvidenceStatus.Verified,
+                EvidenceRegistry.EvidenceStatus.Submitted
+            )
+        );
+        evidenceRegistry.verifyEvidence(evidenceId);
+        vm.stopPrank();
     }
 
     function testNonOwnerCannotAddOrdinaryEvidence() public {
@@ -173,32 +261,12 @@ contract EvidenceRegistryTest is Test {
         evidenceRegistry.addEvidence(assetId, GITHUB_COMMIT, GITHUB_EVIDENCE_HASH, GITHUB_EVIDENCE_URI, bytes32(0));
     }
 
-    function testReviewerCannotAddOrdinaryEvidenceForAssetTheyDoNotOwn() public {
+    function testVerifierCannotSubmitEvidenceForAssetTheyDoNotOwn() public {
         uint256 assetId = _registerDefaultAsset(alice);
 
-        evidenceRegistry.setReviewer(reviewer, true);
-
-        vm.expectRevert(abi.encodeWithSelector(EvidenceRegistry.NotAssetOwner.selector, assetId, reviewer));
+        vm.expectRevert(abi.encodeWithSelector(EvidenceRegistry.NotVerifiedAssetOwner.selector, reviewer));
 
         vm.prank(reviewer);
-        evidenceRegistry.addEvidence(assetId, GITHUB_COMMIT, GITHUB_EVIDENCE_HASH, GITHUB_EVIDENCE_URI, bytes32(0));
-    }
-
-    function testAssetOwnerCannotAddReviewerEvidenceUnlessReviewer() public {
-        uint256 assetId = _registerDefaultAsset(alice);
-
-        vm.expectRevert(abi.encodeWithSelector(EvidenceRegistry.NotReviewer.selector, alice));
-
-        vm.prank(alice);
-        evidenceRegistry.addEvidence(assetId, RISK_REPORT, RISK_REPORT_HASH, RISK_REPORT_URI, ATTESTATION_UID);
-    }
-
-    function testUnauthorizedAddressCannotAddReviewerEvidence() public {
-        uint256 assetId = _registerDefaultAsset(alice);
-
-        vm.expectRevert(abi.encodeWithSelector(EvidenceRegistry.NotReviewer.selector, bob));
-
-        vm.prank(bob);
         evidenceRegistry.addEvidence(assetId, FTO_REPORT, FTO_REPORT_HASH, FTO_REPORT_URI, ATTESTATION_UID);
     }
 
@@ -279,18 +347,20 @@ contract EvidenceRegistryTest is Test {
         assertEq(evidenceRegistry.nextEvidenceId(), 2);
     }
 
-    function testIsReviewerEvidenceReturnsTrueForFTOAndRiskReports() public view {
-        assertTrue(evidenceRegistry.isReviewerEvidence(FTO_REPORT));
-        assertTrue(evidenceRegistry.isReviewerEvidence(RISK_REPORT));
-    }
-
-    function testIsReviewerEvidenceReturnsFalseForOrdinaryEvidence() public view {
-        assertFalse(evidenceRegistry.isReviewerEvidence(GITHUB_COMMIT));
-        assertFalse(evidenceRegistry.isReviewerEvidence(OWNERSHIP_CLAIM));
-    }
-
     function _registerDefaultAsset(address registrant) private returns (uint256 assetId) {
         vm.prank(registrant);
         assetId = assetRegistry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
+    }
+
+    function _addDefaultEvidence(uint256 assetId, address submitter) private returns (uint256 evidenceId) {
+        vm.prank(submitter);
+        evidenceId =
+            evidenceRegistry.addEvidence(assetId, GITHUB_COMMIT, GITHUB_EVIDENCE_HASH, GITHUB_EVIDENCE_URI, bytes32(0));
+    }
+
+    function _verifyIdentity(address account, uint256 roles, uint64 expiresAt) private {
+        vm.prank(account);
+        identityRegistry.registerIdentity("ipfs://encrypted-kyc", roles);
+        identityRegistry.verifyIdentity(account, roles, expiresAt);
     }
 }

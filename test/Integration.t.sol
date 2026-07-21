@@ -49,13 +49,11 @@ contract IntegrationTest is Test {
 
     function setUp() public {
         assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
-        evidenceRegistry = new EvidenceRegistry(address(assetRegistry));
+        evidenceRegistry = new EvidenceRegistry(address(assetRegistry), address(assetRegistry.identityRegistry()));
         licenseEscrow = new LicenseEscrow(address(assetRegistry));
 
         vm.deal(bob, 1 ether);
         vm.deal(carol, 1 ether);
-
-        evidenceRegistry.setReviewer(reviewer, true);
     }
 
     function testFullIPBreakerRWADemoFlow() public {
@@ -90,8 +88,8 @@ contract IntegrationTest is Test {
         assertEq(githubEvidence.evidenceURI, GITHUB_EVIDENCE_URI);
         assertEq(githubEvidence.submittedBy, alice);
 
-        // 3. Authorized reviewer adds due-diligence evidence: FTO report.
-        vm.prank(reviewer);
+        // 3. Alice submits an FTO report and an authorized verifier reviews both records.
+        vm.prank(alice);
         uint256 ftoEvidenceId =
             evidenceRegistry.addEvidence(assetId, FTO_REPORT, FTO_REPORT_HASH, FTO_REPORT_URI, FTO_ATTESTATION_UID);
 
@@ -104,7 +102,20 @@ contract IntegrationTest is Test {
         assertEq(ftoEvidence.evidenceHash, FTO_REPORT_HASH);
         assertEq(ftoEvidence.evidenceURI, FTO_REPORT_URI);
         assertEq(ftoEvidence.attestationUID, FTO_ATTESTATION_UID);
-        assertEq(ftoEvidence.submittedBy, reviewer);
+        assertEq(ftoEvidence.submittedBy, alice);
+
+        vm.startPrank(reviewer);
+        evidenceRegistry.verifyEvidence(githubEvidenceId);
+        evidenceRegistry.verifyEvidence(ftoEvidenceId);
+        vm.stopPrank();
+
+        githubEvidence = evidenceRegistry.getEvidence(githubEvidenceId);
+        ftoEvidence = evidenceRegistry.getEvidence(ftoEvidenceId);
+
+        assertEq(uint256(githubEvidence.status), uint256(EvidenceRegistry.EvidenceStatus.Verified));
+        assertEq(githubEvidence.reviewedBy, reviewer);
+        assertEq(uint256(ftoEvidence.status), uint256(EvidenceRegistry.EvidenceStatus.Verified));
+        assertEq(ftoEvidence.reviewedBy, reviewer);
 
         uint256[] memory evidenceIds = evidenceRegistry.getEvidenceIds(assetId);
 

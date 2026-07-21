@@ -71,12 +71,9 @@ export const evidenceRegistryAbi = [
   },
   {
     type: 'function',
-    name: 'setReviewer',
+    name: 'verifyEvidence',
     stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'reviewer', type: 'address' },
-      { name: 'approved', type: 'bool' },
-    ],
+    inputs: [{ name: 'evidenceId', type: 'uint256' }],
     outputs: [],
   },
   {
@@ -96,6 +93,9 @@ export const evidenceRegistryAbi = [
           { name: 'attestationUID', type: 'bytes32' },
           { name: 'submittedBy', type: 'address' },
           { name: 'submittedAt', type: 'uint256' },
+          { name: 'status', type: 'uint8' },
+          { name: 'reviewedBy', type: 'address' },
+          { name: 'reviewedAt', type: 'uint256' },
         ],
       },
     ],

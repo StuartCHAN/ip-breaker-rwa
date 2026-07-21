@@ -115,7 +115,7 @@ function App() {
     attestationUID: zeroBytes32,
   });
 
-  const [reviewerAddress, setReviewerAddress] = useState('');
+  const [evidenceReviewId, setEvidenceReviewId] = useState('1');
 
   const [licenseForm, setLicenseForm] = useState({
     priceEth: '0.0001',
@@ -186,19 +186,6 @@ function App() {
     args: [evidenceIdBigInt],
     query: {
       enabled: Boolean(contractAddresses.evidenceRegistry && hasEvidenceId),
-    },
-  });
-
-  const reviewerAddressForRead = reviewerAddress.trim() as `0x${string}`;
-  const isReviewerAddressReady = /^0x[a-fA-F0-9]{40}$/.test(reviewerAddress.trim());
-
-  const { data: reviewerApproved, error: reviewerError } = useReadContract({
-    address: contractAddresses.evidenceRegistry,
-    abi: evidenceRegistryAbi,
-    functionName: 'reviewers',
-    args: [reviewerAddressForRead],
-    query: {
-      enabled: Boolean(contractAddresses.evidenceRegistry && isReviewerAddressReady),
     },
   });
 
@@ -332,14 +319,14 @@ function App() {
     });
   }
 
-  async function approveReviewer(event: FormEvent<HTMLFormElement>) {
+  async function verifyEvidence(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await runTx('Approving reviewer', async () => {
+    await runTx('Verifying evidence', async () => {
       return writeContractAsync({
         address: requireAddress(contractAddresses.evidenceRegistry, 'EvidenceRegistry'),
         abi: evidenceRegistryAbi,
-        functionName: 'setReviewer',
-        args: [reviewerAddress as `0x${string}`, true],
+        functionName: 'verifyEvidence',
+        args: [BigInt(evidenceReviewId)],
       });
     });
   }
@@ -425,11 +412,11 @@ function App() {
           <button type="submit">Register asset</button>
         </form>
 
-        <form className="card" onSubmit={approveReviewer}>
-          <h2>2. Approve Reviewer</h2>
-          <p className="hint">Only the EvidenceRegistry owner can approve reviewers.</p>
-          <input value={reviewerAddress} onChange={(e) => setReviewerAddress(e.target.value)} placeholder="Reviewer address" />
-          <button type="submit">Approve reviewer</button>
+        <form className="card" onSubmit={verifyEvidence}>
+          <h2>2. Verify Evidence</h2>
+          <p className="hint">Requires an active ROLE_VERIFIER identity.</p>
+          <input value={evidenceReviewId} onChange={(e) => setEvidenceReviewId(e.target.value)} placeholder="Evidence ID" />
+          <button type="submit">Verify evidence</button>
         </form>
 
         <form className="card" onSubmit={addEvidence}>
@@ -516,7 +503,6 @@ function App() {
           <DataBlock title="Asset Token URI" data={assetTokenURI} error={assetTokenURIError} />
           <DataBlock title="Evidence IDs for Asset" data={evidenceIds} error={evidenceIdsError} />
           <DataBlock title="Evidence Record" data={evidenceData} error={evidenceError} />
-          <DataBlock title="Reviewer Approved" data={isReviewerAddressReady ? reviewerApproved : 'Enter a reviewer address above'} error={reviewerError} />
           <DataBlock title="License Offer" data={offerData} error={offerError} />
           <DataBlock title="License Certificate" data={licenseData} error={licenseError} />
           <DataBlock title="License Valid" data={licenseValid} error={licenseValidError} />

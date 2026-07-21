@@ -27,7 +27,7 @@ contract Deploy is Script {
         identityRegistry = new IdentityRegistry();
         identityRegistry.grantVerifierRole(vm.addr(deployerPrivateKey));
         assetRegistry = new IPAssetRegistry(address(identityRegistry));
-        evidenceRegistry = new EvidenceRegistry(address(assetRegistry));
+        evidenceRegistry = new EvidenceRegistry(address(assetRegistry), address(identityRegistry));
         licenseEscrow = new LicenseEscrow(address(assetRegistry));
 
         vm.stopBroadcast();
