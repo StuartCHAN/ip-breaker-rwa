@@ -186,6 +186,53 @@ contract LicenseEscrowIdentityTest is Test {
         assertEq(address(licenseEscrow).balance, 0);
     }
 
+    function testSuspendedLicensorCannotConfirmPerformance() public {
+        uint256 agreementId = _createFundedAgreement(0);
+        identityRegistry.suspendIdentity(licensor, "licensor suspended");
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotVerifiedLicensor.selector, licensor));
+        vm.prank(licensor);
+        licenseEscrow.confirmPerformance(agreementId);
+
+        _assertFundedAgreementUnchanged(agreementId);
+    }
+
+    function testExpiredLicensorCannotConfirmPerformance() public {
+        uint64 expiresAt = uint64(block.timestamp + 30 days);
+        uint256 agreementId = _createFundedAgreement(expiresAt);
+        vm.warp(expiresAt);
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotVerifiedLicensor.selector, licensor));
+        vm.prank(licensor);
+        licenseEscrow.confirmPerformance(agreementId);
+
+        _assertFundedAgreementUnchanged(agreementId);
+    }
+
+    function testRevokedLicensorCannotConfirmPerformance() public {
+        uint256 agreementId = _createFundedAgreement(0);
+        identityRegistry.revokeIdentity(licensor, "licensor revoked");
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseEscrow.NotVerifiedLicensor.selector, licensor));
+        vm.prank(licensor);
+        licenseEscrow.confirmPerformance(agreementId);
+
+        _assertFundedAgreementUnchanged(agreementId);
+    }
+
+    function testValidLicensorCanConfirmPerformance() public {
+        uint256 agreementId = _createFundedAgreement(0);
+
+        vm.prank(licensor);
+        licenseEscrow.confirmPerformance(agreementId);
+
+        LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
+        assertEq(uint256(agreement.status), uint256(LicenseEscrow.LicenseStatus.Active));
+        assertEq(agreement.escrowedAmount, LICENSE_FEE);
+        assertGt(agreement.fundedAt, 0);
+        assertEq(address(licenseEscrow).balance, LICENSE_FEE);
+    }
+
     function _verifyIdentity(address account, uint256 roles, uint64 expiresAt) private {
         vm.prank(account);
         identityRegistry.registerIdentity("ipfs://encrypted-kyc", roles);
@@ -211,11 +258,31 @@ contract LicenseEscrowIdentityTest is Test {
         agreementId = _createAgreement(assetId, licensee);
     }
 
+    function _createFundedAgreement(uint64 licensorExpiresAt) private returns (uint256 agreementId) {
+        _verifyIdentity(licensor, identityRegistry.ROLE_ASSET_OWNER(), licensorExpiresAt);
+        _verifyIdentity(licensee, identityRegistry.ROLE_LICENSEE(), 0);
+        uint256 assetId = _registerAsset(licensor);
+
+        vm.prank(licensor);
+        agreementId = _createAgreement(assetId, licensee);
+
+        vm.prank(licensee);
+        licenseEscrow.fundLicense{value: LICENSE_FEE}(agreementId);
+    }
+
     function _assertAgreementUnchangedAfterFailedFunding(uint256 agreementId) private view {
         LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
         assertEq(uint256(agreement.status), uint256(LicenseEscrow.LicenseStatus.Created));
         assertEq(agreement.escrowedAmount, 0);
         assertEq(agreement.fundedAt, 0);
         assertEq(address(licenseEscrow).balance, 0);
+    }
+
+    function _assertFundedAgreementUnchanged(uint256 agreementId) private view {
+        LicenseEscrow.LicenseAgreement memory agreement = licenseEscrow.getAgreement(agreementId);
+        assertEq(uint256(agreement.status), uint256(LicenseEscrow.LicenseStatus.Funded));
+        assertEq(agreement.escrowedAmount, LICENSE_FEE);
+        assertGt(agreement.fundedAt, 0);
+        assertEq(address(licenseEscrow).balance, LICENSE_FEE);
     }
 }

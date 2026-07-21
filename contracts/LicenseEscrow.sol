@@ -427,6 +427,11 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
 
         if (msg.sender != agreement.licensor) revert NotLicensor(agreementId, msg.sender);
 
+        uint256 assetOwnerRole = identityRegistry.ROLE_ASSET_OWNER();
+        if (!identityRegistry.hasBusinessRole(msg.sender, assetOwnerRole)) {
+            revert NotVerifiedLicensor(msg.sender);
+        }
+
         _transition(agreementId, agreement, LicenseStatus.Funded, LicenseStatus.Active);
 
         emit PerformanceConfirmed(agreementId, msg.sender);
