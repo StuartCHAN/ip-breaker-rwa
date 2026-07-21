@@ -282,12 +282,12 @@ contract IdentityRegistry is AccessControl {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Check if an address has a specific role
+     * @notice Check if an address has a specific business identity role
      * @param account Address to check
-     * @param role Role bit mask (can be combined: ROLE_ASSET_OWNER | ROLE_LICENSEE)
+     * @param roleMask_ Role bit mask (can be combined: ROLE_ASSET_OWNER | ROLE_LICENSEE)
      * @return True if account has ALL specified roles AND is verified (not expired)
      */
-    function hasRole(address account, uint256 role) external view returns (bool) {
+    function hasBusinessRole(address account, uint256 roleMask_) external view returns (bool) {
         Identity storage identity = identities[account];
 
         // Must be in Verified status
@@ -301,7 +301,7 @@ contract IdentityRegistry is AccessControl {
         }
 
         // Check if account has ALL bits set in the role mask
-        return (identity.roleMask & role) == role;
+        return (identity.roleMask & roleMask_) == roleMask_;
     }
 
     /**

@@ -14,6 +14,8 @@ import { arbitrumSepolia, baseSepolia, foundry, sepolia } from 'wagmi/chains';
 import { ipAssetRegistryAbi, evidenceRegistryAbi, licenseEscrowAbi } from './abis';
 import { contractAddresses } from './config';
 import AgreementDashboard from './components/AgreementDashboard';
+import DemoPanel from './components/DemoPanel';
+import EventTimeline from './components/EventTimeline';
 
 const zeroBytes32 = '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
 
@@ -410,6 +412,8 @@ function App() {
         {lastTx && <code>{lastTx}</code>}
       </section>
 
+      <DemoPanel />
+
       <section className="grid">
         <form className="card" onSubmit={registerAsset}>
           <h2>1. Register IP Asset</h2>
@@ -470,6 +474,8 @@ function App() {
 
 
       <AgreementDashboard />
+
+      <EventTimeline />
 
       <section className="card read-dashboard">
         <div className="section-heading">
