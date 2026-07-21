@@ -4,9 +4,11 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 
 import {RecoveryManager} from "../contracts/RecoveryManager.sol";
+import {MockRecoveryMigrationToken} from "./mocks/MockRecoveryMigrationToken.sol";
 
 contract RecoveryManagerTest is Test {
     RecoveryManager private manager;
+    MockRecoveryMigrationToken private migrationToken;
 
     address private admin = makeAddr("admin");
     address private requester = makeAddr("requester");
@@ -15,7 +17,7 @@ contract RecoveryManagerTest is Test {
     address private executor = makeAddr("executor");
     address private guardian = makeAddr("guardian");
     address private outsider = makeAddr("outsider");
-    address private revenueToken = makeAddr("revenueToken");
+    address private revenueToken;
     address private source = makeAddr("source");
 
     address private destination;
@@ -29,6 +31,8 @@ contract RecoveryManagerTest is Test {
     function setUp() public {
         (destination, destinationKey) = makeAddrAndKey("destination");
         manager = new RecoveryManager(admin, CHALLENGE_PERIOD, EXECUTION_WINDOW);
+        migrationToken = new MockRecoveryMigrationToken();
+        revenueToken = address(migrationToken);
 
         vm.startPrank(admin);
         manager.grantRole(manager.RECOVERY_REQUESTER_ROLE(), requester);
@@ -91,7 +95,11 @@ contract RecoveryManagerTest is Test {
         manager.authorizeExecution(recoveryId);
 
         request = manager.getRequest(recoveryId);
-        assertEq(uint256(request.status), uint256(RecoveryManager.RequestStatus.ExecutionAuthorized));
+        assertEq(uint256(request.status), uint256(RecoveryManager.RequestStatus.Executed));
+        assertEq(migrationToken.executionCount(), 1);
+        assertEq(migrationToken.lastRecoveryId(), recoveryId);
+        assertEq(migrationToken.lastSource(), source);
+        assertEq(migrationToken.lastDestination(), destination);
     }
 
     function testExecutorCannotModifyParameters() public {

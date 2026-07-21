@@ -7,6 +7,7 @@ import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseRevenueToken} from "../contracts/LicenseRevenueToken.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 import {MockInvestorEligibility} from "./mocks/MockInvestorEligibility.sol";
+import {MockRecoveryManager} from "./mocks/MockRecoveryManager.sol";
 import {MockRevenueVault} from "./mocks/MockRevenueVault.sol";
 
 contract LicenseRevenueTokenTest is Test {
@@ -14,6 +15,7 @@ contract LicenseRevenueTokenTest is Test {
     MockInvestorEligibility private eligibility;
     LicenseRevenueToken private token;
     MockRevenueVault private revenueVault;
+    MockRecoveryManager private recoveryManager;
 
     address private controller = makeAddr("controller");
     address private minter = makeAddr("minter");
@@ -30,7 +32,13 @@ contract LicenseRevenueTokenTest is Test {
     event LifecycleChanged(
         LicenseRevenueToken.Lifecycle indexed previousLifecycle, LicenseRevenueToken.Lifecycle indexed newLifecycle
     );
-    event TokensRecovered(address indexed from, address indexed to, uint256 amount, address indexed controller);
+    event RecoveryMigrationExecuted(
+        bytes32 indexed recoveryId,
+        address indexed source,
+        address indexed destination,
+        uint256 amount,
+        address recoveryManager
+    );
 
     function setUp() public {
         assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
@@ -46,8 +54,11 @@ contract LicenseRevenueTokenTest is Test {
         eligibility = new MockInvestorEligibility();
         token = _deployToken(assetId, FINAL_SUPPLY, address(eligibility), controller);
         revenueVault = new MockRevenueVault(address(token));
+        recoveryManager = new MockRecoveryManager();
         vm.prank(controller);
         token.bindRevenueVault(address(revenueVault));
+        vm.prank(controller);
+        token.bindRecoveryManager(address(recoveryManager));
     }
 
     function testImmutableBindingAndInitialLifecycle() public view {
@@ -61,6 +72,7 @@ contract LicenseRevenueTokenTest is Test {
         assertEq(uint256(token.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Created));
         assertEq(token.totalSupply(), 0);
         assertEq(address(token.revenueVault()), address(revenueVault));
+        assertEq(address(token.recoveryManager()), address(recoveryManager));
     }
 
     function testRevenueVaultBindingIsOneTime() public {
@@ -92,6 +104,17 @@ contract LicenseRevenueTokenTest is Test {
         vm.prank(controller);
         vm.expectRevert(LicenseRevenueToken.RevenueVaultNotBound.selector);
         unbound.beginMinting();
+    }
+
+    function testCannotBeginMintingBeforeRecoveryManagerBinding() public {
+        LicenseRevenueToken unbound = _deployToken(assetId, FINAL_SUPPLY, address(eligibility), controller);
+        MockRevenueVault unboundVault = new MockRevenueVault(address(unbound));
+
+        vm.startPrank(controller);
+        unbound.bindRevenueVault(address(unboundVault));
+        vm.expectRevert(LicenseRevenueToken.RecoveryManagerNotBound.selector);
+        unbound.beginMinting();
+        vm.stopPrank();
     }
 
     function testConstructorRejectsMissingAsset() public {
@@ -281,34 +304,34 @@ contract LicenseRevenueTokenTest is Test {
         token.transfer(bob, 1 ether);
     }
 
-    function testControllerRecoveryPreservesTotalSupply() public {
+    function testRecoveryManagerMigrationPreservesTotalSupply() public {
         _activateWithAliceHoldingFinalSupply();
         eligibility.setEligible(assetId, alice, false);
         eligibility.setEligible(assetId, bob, true);
-        uint256 amount = FINAL_SUPPLY;
+        bytes32 recoveryId = keccak256("recovery-success");
+        recoveryManager.authorize(recoveryId, address(token), alice, bob);
 
         vm.expectEmit(true, true, true, true, address(token));
-        emit TokensRecovered(alice, bob, amount, controller);
+        emit RecoveryMigrationExecuted(recoveryId, alice, bob, FINAL_SUPPLY, address(recoveryManager));
 
-        vm.prank(controller);
-        token.recoverTokens(alice, bob, amount);
+        recoveryManager.execute(address(token), recoveryId, alice, bob);
 
-        assertEq(token.balanceOf(alice), FINAL_SUPPLY - amount);
-        assertEq(token.balanceOf(bob), amount);
+        assertEq(token.balanceOf(alice), 0);
+        assertEq(token.balanceOf(bob), FINAL_SUPPLY);
         assertEq(token.totalSupply(), FINAL_SUPPLY);
         assertEq(revenueVault.checkpointCount(), 2);
+        assertTrue(token.executedRecovery(recoveryId));
     }
 
-    function testControllerRecoveryRejectsPartialBalance() public {
+    function testPartialMigrationLegacyEntryPointRejected() public {
         _activateWithAliceHoldingFinalSupply();
         eligibility.setEligible(assetId, bob, true);
 
         vm.prank(controller);
-        vm.expectRevert(
-            abi.encodeWithSelector(LicenseRevenueToken.RecoveryRequiresFullBalance.selector, 250 ether, FINAL_SUPPLY)
-        );
-        token.recoverTokens(alice, bob, 250 ether);
+        (bool success,) = address(token)
+            .call(abi.encodeWithSignature("recoverTokens(address,address,uint256)", alice, bob, 250 ether));
 
+        assertFalse(success);
         assertEq(token.balanceOf(alice), FINAL_SUPPLY);
         assertEq(token.balanceOf(bob), 0);
         assertEq(revenueVault.checkpointCount(), 1);
@@ -317,10 +340,27 @@ contract LicenseRevenueTokenTest is Test {
     function testUnauthorizedRecoveryRejected() public {
         _activateWithAliceHoldingFinalSupply();
         eligibility.setEligible(assetId, bob, true);
+        bytes32 recoveryId = keccak256("unauthorized-recovery");
 
         vm.prank(outsider);
-        vm.expectRevert();
-        token.recoverTokens(alice, bob, 1 ether);
+        vm.expectRevert(abi.encodeWithSelector(LicenseRevenueToken.OnlyRecoveryManager.selector, outsider));
+        token.executeRecoveryMigration(recoveryId, alice, bob);
+    }
+
+    function testRecoveryExecutionReplayRejected() public {
+        _activateWithAliceHoldingFinalSupply();
+        eligibility.setEligible(assetId, bob, true);
+        bytes32 recoveryId = keccak256("replayed-recovery");
+        recoveryManager.authorize(recoveryId, address(token), alice, bob);
+
+        recoveryManager.execute(address(token), recoveryId, alice, bob);
+
+        vm.expectRevert(abi.encodeWithSelector(LicenseRevenueToken.RecoveryAlreadyExecuted.selector, recoveryId));
+        recoveryManager.execute(address(token), recoveryId, alice, bob);
+
+        assertEq(token.totalSupply(), FINAL_SUPPLY);
+        assertEq(token.balanceOf(alice), 0);
+        assertEq(token.balanceOf(bob), FINAL_SUPPLY);
     }
 
     function testNoPublicBurnFunction() public {

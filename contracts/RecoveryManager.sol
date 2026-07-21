@@ -6,9 +6,11 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+import {IRecoveryMigrationToken} from "./interfaces/IRecoveryMigrationToken.sol";
+
 /// @title RecoveryManager
-/// @notice Governs recovery authorization without moving token balances or reward state.
-/// @dev Phase 3.1-B2-C1 ends at one-time execution authorization. Token/Vault calls are deferred.
+/// @notice Governs recovery authorization and executes approved migrations on the fixed Revenue Token.
+/// @dev Calls only the request's Revenue Token and never calls RevenueVault directly.
 contract RecoveryManager is AccessControl, EIP712, ReentrancyGuard {
     enum RequestStatus {
         None,
@@ -17,6 +19,7 @@ contract RecoveryManager is AccessControl, EIP712, ReentrancyGuard {
         Approved,
         Challenged,
         ExecutionAuthorized,
+        Executed,
         Cancelled,
         Expired
     }
@@ -60,6 +63,7 @@ contract RecoveryManager is AccessControl, EIP712, ReentrancyGuard {
     error InvalidExecutionWindow();
     error InvalidRecoveryAccounts(address source, address destination);
     error ZeroRevenueToken();
+    error InvalidRevenueToken(address revenueToken);
     error ZeroEvidenceCommitment();
     error InvalidDeadline(uint256 deadline);
     error InvalidNonce(uint256 expected, uint256 provided);
@@ -99,6 +103,13 @@ contract RecoveryManager is AccessControl, EIP712, ReentrancyGuard {
         address destination,
         uint256 nonce
     );
+    event RecoveryExecuted(
+        bytes32 indexed recoveryId,
+        address indexed revenueToken,
+        address indexed source,
+        address destination,
+        address executor
+    );
     event RecoveryCancelled(bytes32 indexed recoveryId, address indexed authority, bytes32 reasonHash);
     event RecoveryExpired(bytes32 indexed recoveryId);
 
@@ -125,6 +136,7 @@ contract RecoveryManager is AccessControl, EIP712, ReentrancyGuard {
         bytes calldata destinationSignature
     ) external onlyRole(RECOVERY_REQUESTER_ROLE) returns (bytes32 recoveryId) {
         if (revenueToken == address(0)) revert ZeroRevenueToken();
+        if (revenueToken.code.length == 0) revert InvalidRevenueToken(revenueToken);
         if (source == address(0) || destination == address(0) || source == destination) {
             revert InvalidRecoveryAccounts(source, destination);
         }
@@ -225,7 +237,7 @@ contract RecoveryManager is AccessControl, EIP712, ReentrancyGuard {
         emit RecoveryChallenged(recoveryId, msg.sender, reasonHash);
     }
 
-    /// @notice Consumes a ready request without moving Token or Vault state in Phase C1.
+    /// @notice Authorizes and atomically executes the request against its fixed Revenue Token.
     function authorizeExecution(bytes32 recoveryId) external onlyRole(RECOVERY_EXECUTOR_ROLE) nonReentrant {
         RecoveryRequest storage request = _getRequest(recoveryId);
         _requireStatus(recoveryId, request.status, RequestStatus.Approved);
@@ -245,11 +257,17 @@ contract RecoveryManager is AccessControl, EIP712, ReentrancyGuard {
         }
 
         request.status = RequestStatus.ExecutionAuthorized;
-        activeRequest[request.revenueToken][request.source] = bytes32(0);
 
         emit RecoveryExecutionAuthorized(
             recoveryId, msg.sender, request.revenueToken, request.source, request.destination, request.nonce
         );
+
+        IRecoveryMigrationToken(request.revenueToken)
+            .executeRecoveryMigration(recoveryId, request.source, request.destination);
+
+        request.status = RequestStatus.Executed;
+        activeRequest[request.revenueToken][request.source] = bytes32(0);
+        emit RecoveryExecuted(recoveryId, request.revenueToken, request.source, request.destination, msg.sender);
     }
 
     /// @notice Cancels a nonterminal request by its requester or a recovery guardian.
@@ -291,6 +309,17 @@ contract RecoveryManager is AccessControl, EIP712, ReentrancyGuard {
         RecoveryRequest memory request = _requests[recoveryId];
         if (request.status == RequestStatus.None) revert RequestNotFound(recoveryId);
         return request;
+    }
+
+    /// @notice Allows the bound Revenue Token to verify the exact in-flight migration parameters.
+    function isExecutionAuthorized(bytes32 recoveryId, address revenueToken, address source, address destination)
+        external
+        view
+        returns (bool)
+    {
+        RecoveryRequest storage request = _requests[recoveryId];
+        return request.status == RequestStatus.ExecutionAuthorized && request.revenueToken == revenueToken
+            && request.source == source && request.destination == destination;
     }
 
     function hashRecoveryConsent(

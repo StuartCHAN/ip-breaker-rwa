@@ -10,6 +10,7 @@ import {LicenseRevenueToken} from "../contracts/LicenseRevenueToken.sol";
 import {RevenueVault} from "../contracts/RevenueVault.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 import {MockInvestorEligibility} from "./mocks/MockInvestorEligibility.sol";
+import {MockRecoveryManager} from "./mocks/MockRecoveryManager.sol";
 
 contract RevenueVaultCheckpointTest is Test {
     IPAssetRegistry private assetRegistry;
@@ -17,6 +18,7 @@ contract RevenueVaultCheckpointTest is Test {
     RevenueVault private vault;
     ERC20Mock private settlementToken;
     MockInvestorEligibility private eligibility;
+    MockRecoveryManager private recoveryManager;
 
     address private controller = makeAddr("controller");
     address private minter = makeAddr("minter");
@@ -53,9 +55,11 @@ contract RevenueVaultCheckpointTest is Test {
         );
         settlementToken = new ERC20Mock();
         vault = new RevenueVault(address(revenueToken), address(settlementToken), controller, depositor);
+        recoveryManager = new MockRecoveryManager();
 
         vm.startPrank(controller);
         revenueToken.bindRevenueVault(address(vault));
+        revenueToken.bindRecoveryManager(address(recoveryManager));
         revenueToken.beginMinting();
         revenueToken.grantRole(revenueToken.MINTER_ROLE(), minter);
         vm.stopPrank();
@@ -122,11 +126,13 @@ contract RevenueVaultCheckpointTest is Test {
         uint256 claimedBefore = vault.totalClaimed();
         uint256 vaultBalanceBefore = settlementToken.balanceOf(address(vault));
 
+        bytes32 recoveryId = keccak256("vault-recovery");
+        recoveryManager.authorize(recoveryId, address(revenueToken), alice, bob);
+
         vm.expectEmit(true, true, false, true, address(vault));
         emit RevenueStateMigrated(alice, bob, 900 ether, 900 ether);
 
-        vm.prank(controller);
-        revenueToken.recoverTokens(alice, bob, 900 ether);
+        recoveryManager.execute(address(revenueToken), recoveryId, alice, bob);
 
         assertEq(revenueToken.balanceOf(alice), 0);
         assertEq(revenueToken.balanceOf(bob), FINAL_SUPPLY);

@@ -6,13 +6,13 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 import {IInvestorEligibility} from "./interfaces/IInvestorEligibility.sol";
+import {IRecoveryManager} from "./interfaces/IRecoveryManager.sol";
 import {IRevenueVault} from "./interfaces/IRevenueVault.sol";
 
 /// @title LicenseRevenueToken
 /// @notice Compliance-restricted revenue participation units for one registered IP asset.
 /// @dev The token does not represent IP ownership, a license, governance, debt principal,
-///      guaranteed yield, or a claim on revenue that has not entered a future RevenueVault.
-///      Revenue accounting hooks are intentionally deferred to Phase 3.1-A2.
+///      guaranteed yield, or a claim on revenue that has not entered its RevenueVault.
 contract LicenseRevenueToken is ERC20, AccessControl {
     enum Lifecycle {
         Created,
@@ -30,6 +30,9 @@ contract LicenseRevenueToken is ERC20, AccessControl {
 
     Lifecycle public lifecycle;
     IRevenueVault public revenueVault;
+    IRecoveryManager public recoveryManager;
+
+    mapping(bytes32 recoveryId => bool executed) public executedRecovery;
 
     bool private _recoveryInProgress;
     bool private _checkpointInProgress;
@@ -52,11 +55,24 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     error RevenueVaultTokenMismatch(address expectedToken, address actualToken);
     error ReentrantCheckpoint();
     error ZeroRecoveryBalance(address account);
-    error RecoveryRequiresFullBalance(uint256 requested, uint256 available);
+    error ZeroRecoveryManager();
+    error RecoveryManagerAlreadyBound(address manager);
+    error RecoveryManagerNotBound();
+    error OnlyRecoveryManager(address caller);
+    error InvalidRecoveryId();
+    error RecoveryAlreadyExecuted(bytes32 recoveryId);
+    error RecoveryParametersNotAuthorized(bytes32 recoveryId, address source, address destination);
 
     event LifecycleChanged(Lifecycle indexed previousLifecycle, Lifecycle indexed newLifecycle);
-    event TokensRecovered(address indexed from, address indexed to, uint256 amount, address indexed controller);
     event RevenueVaultBound(address indexed vault);
+    event RecoveryManagerBound(address indexed manager);
+    event RecoveryMigrationExecuted(
+        bytes32 indexed recoveryId,
+        address indexed source,
+        address indexed destination,
+        uint256 amount,
+        address recoveryManager
+    );
 
     constructor(
         string memory name_,
@@ -101,10 +117,23 @@ contract LicenseRevenueToken is ERC20, AccessControl {
         emit RevenueVaultBound(vault_);
     }
 
+    /// @notice Permanently binds the only contract authorized to execute account recovery.
+    function bindRecoveryManager(address manager_) external onlyRole(TOKEN_CONTROLLER_ROLE) {
+        if (lifecycle != Lifecycle.Created) revert InvalidLifecycle(lifecycle, Lifecycle.Created);
+        if (manager_ == address(0)) revert ZeroRecoveryManager();
+
+        address currentManager = address(recoveryManager);
+        if (currentManager != address(0)) revert RecoveryManagerAlreadyBound(currentManager);
+
+        recoveryManager = IRecoveryManager(manager_);
+        emit RecoveryManagerBound(manager_);
+    }
+
     /// @notice Opens the one-time allocation phase.
     function beginMinting() external onlyRole(TOKEN_CONTROLLER_ROLE) {
         if (lifecycle != Lifecycle.Created) revert InvalidLifecycle(lifecycle, Lifecycle.Created);
         if (address(revenueVault) == address(0)) revert RevenueVaultNotBound();
+        if (address(recoveryManager) == address(0)) revert RecoveryManagerNotBound();
         _setLifecycle(Lifecycle.Minting);
     }
 
@@ -128,27 +157,31 @@ contract LicenseRevenueToken is ERC20, AccessControl {
         _setLifecycle(Lifecycle.Activated);
     }
 
-    /// @notice Moves tokens from an inaccessible/ineligible account without changing supply.
-    /// @dev Phase 3.1-B2-B1 supports controlled full-balance accounting migration only.
-    function recoverTokens(address from, address to, uint256 amount) external onlyRole(TOKEN_CONTROLLER_ROLE) {
-        if (from == address(0)) revert InvalidRecoveryAccount(from);
-        if (to == address(0) || to == from) revert InvalidRecoveryAccount(to);
-        if (!_canHold(to)) revert IneligibleInvestor(to);
+    /// @notice Migrates one source account's complete balance under an authorized recovery request.
+    function executeRecoveryMigration(bytes32 recoveryId, address source, address destination) external {
+        IRecoveryManager manager = recoveryManager;
+        if (msg.sender != address(manager)) revert OnlyRecoveryManager(msg.sender);
+        if (recoveryId == bytes32(0)) revert InvalidRecoveryId();
+        if (executedRecovery[recoveryId]) revert RecoveryAlreadyExecuted(recoveryId);
+        if (source == address(0)) revert InvalidRecoveryAccount(source);
+        if (destination == address(0) || destination == source) revert InvalidRecoveryAccount(destination);
+        if (!_canHold(destination)) revert IneligibleInvestor(destination);
+        if (!manager.isExecutionAuthorized(recoveryId, address(this), source, destination)) {
+            revert RecoveryParametersNotAuthorized(recoveryId, source, destination);
+        }
 
-        uint256 sourceBalance = balanceOf(from);
-        if (sourceBalance == 0) revert ZeroRecoveryBalance(from);
-        if (amount != sourceBalance) revert RecoveryRequiresFullBalance(amount, sourceBalance);
+        uint256 sourceBalance = balanceOf(source);
+        if (sourceBalance == 0) revert ZeroRecoveryBalance(source);
 
         uint256 supplyBefore = totalSupply();
+        executedRecovery[recoveryId] = true;
 
-        // Recovery uses the same checkpointed balance path but does not migrate the
-        // source account's historical pending reward in Phase 3.1-B2-A.
         _recoveryInProgress = true;
-        _update(from, to, amount);
+        _update(source, destination, sourceBalance);
         _recoveryInProgress = false;
 
         assert(totalSupply() == supplyBefore);
-        emit TokensRecovered(from, to, amount, msg.sender);
+        emit RecoveryMigrationExecuted(recoveryId, source, destination, sourceBalance, msg.sender);
     }
 
     /// @dev Single extension point for every token balance movement. The vault settles
