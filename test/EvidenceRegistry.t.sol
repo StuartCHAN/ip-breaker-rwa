@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {EvidenceRegistry} from "../contracts/EvidenceRegistry.sol";
+import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 contract EvidenceRegistryTest is Test {
     IPAssetRegistry private assetRegistry;
@@ -51,7 +52,7 @@ contract EvidenceRegistryTest is Test {
     );
 
     function setUp() public {
-        assetRegistry = new IPAssetRegistry();
+        assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
         evidenceRegistry = new EvidenceRegistry(address(assetRegistry));
     }
 

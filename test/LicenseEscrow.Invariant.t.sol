@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
+import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 /// @notice Foundry invariant tests for the escrow flow. Unlike the example-based unit tests
 ///         in LicenseEscrowAgreement.t.sol (which each check one specific scenario), these run
@@ -24,7 +25,7 @@ contract LicenseEscrowInvariantTest is Test {
     Handler internal handler;
 
     function setUp() public {
-        assetRegistry = new IPAssetRegistry();
+        assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
         licenseEscrow = new LicenseEscrow(address(assetRegistry));
         handler = new Handler(assetRegistry, licenseEscrow);
 

@@ -6,6 +6,7 @@ import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Recei
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
+import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 /// @notice Dedicated attack-scenario tests for the escrow flow, separate from the ordinary
 ///         unit tests in LicenseEscrowAgreement.t.sol. These specifically try to break the
@@ -28,7 +29,7 @@ contract LicenseEscrowSecurityTest is Test {
     string private constant TERMS_URI = "ipfs://license-terms-commercial-internal-use";
 
     function setUp() public {
-        assetRegistry = new IPAssetRegistry();
+        assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
         licenseEscrow = new LicenseEscrow(address(assetRegistry));
 
         vm.deal(bob, 10 ether);

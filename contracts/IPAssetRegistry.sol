@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
+import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
 import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 
 /// @title IPAssetRegistry
@@ -25,6 +26,8 @@ contract IPAssetRegistry is ERC721, Ownable, IIPAssetRegistry {
     error EmptyJurisdiction();
     error ZeroDocumentHash();
     error EmptyMetadataURI();
+    error ZeroIdentityRegistry();
+    error NotVerifiedAssetOwner(address account);
     error AssetDoesNotExist(uint256 assetId);
 
     event IPAssetRegistered(
@@ -38,9 +41,14 @@ contract IPAssetRegistry is ERC721, Ownable, IIPAssetRegistry {
 
     uint256 private _nextAssetId = 1;
 
+    IIdentityRegistry public immutable identityRegistry;
+
     mapping(uint256 assetId => IPAsset asset) private _assets;
 
-    constructor() ERC721("IP Breaker Asset", "IPBA") Ownable(msg.sender) {}
+    constructor(address identityRegistry_) ERC721("IP Breaker Asset", "IPBA") Ownable(msg.sender) {
+        if (identityRegistry_ == address(0)) revert ZeroIdentityRegistry();
+        identityRegistry = IIdentityRegistry(identityRegistry_);
+    }
 
     /// @notice Registers an IP asset and mints an IP Asset NFT to the caller.
     /// @param title Human-readable asset title.
@@ -56,6 +64,11 @@ contract IPAssetRegistry is ERC721, Ownable, IIPAssetRegistry {
         bytes32 documentHash,
         string calldata metadataURI
     ) external returns (uint256 assetId) {
+        uint256 assetOwnerRole = identityRegistry.ROLE_ASSET_OWNER();
+        if (!identityRegistry.hasBusinessRole(msg.sender, assetOwnerRole)) {
+            revert NotVerifiedAssetOwner(msg.sender);
+        }
+
         if (bytes(title).length == 0) revert EmptyTitle();
         if (bytes(assetType).length == 0) revert EmptyAssetType();
         if (bytes(jurisdiction).length == 0) revert EmptyJurisdiction();

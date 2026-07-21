@@ -6,6 +6,7 @@ import {Test} from "forge-std/Test.sol";
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {EvidenceRegistry} from "../contracts/EvidenceRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
+import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 /// @title IP Breaker RWA Integration Test
 /// @notice Runs the full v0.1 demo flow:
@@ -47,7 +48,7 @@ contract IntegrationTest is Test {
     string private constant TERMS_URI = "ipfs://license-terms-commercial-internal-use";
 
     function setUp() public {
-        assetRegistry = new IPAssetRegistry();
+        assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
         evidenceRegistry = new EvidenceRegistry(address(assetRegistry));
         licenseEscrow = new LicenseEscrow(address(assetRegistry));
 

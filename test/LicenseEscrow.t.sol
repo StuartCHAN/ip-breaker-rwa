@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
+import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 contract LicenseEscrowTest is Test {
     IPAssetRegistry private assetRegistry;
@@ -51,7 +52,7 @@ contract LicenseEscrowTest is Test {
     );
 
     function setUp() public {
-        assetRegistry = new IPAssetRegistry();
+        assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
         licenseEscrow = new LicenseEscrow(address(assetRegistry));
 
         vm.deal(bob, 10 ether);
