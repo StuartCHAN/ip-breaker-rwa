@@ -250,7 +250,21 @@ It can read:
 - total revenue by asset;
 - next asset, evidence, offer, and license IDs.
 
-This is useful for demo recordings because each write action can be verified immediately from the UI.
+This is useful for demo recordings because each write action can be verified immediately from the UI. 
+
+### License Agreement Flow
+
+IP Breaker RWA supports programmable licensing workflows:
+
+1. Register IP Asset
+2. Attach verification evidence
+3. Create License Agreement
+4. Fund escrow
+5. Confirm performance
+6. Release payment
+
+The protocol records licensing lifecycle states on-chain. 
+
 
 ## Repository structure
 

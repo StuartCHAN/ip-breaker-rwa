@@ -13,6 +13,7 @@ import { arbitrumSepolia, baseSepolia, foundry, sepolia } from 'wagmi/chains';
 
 import { ipAssetRegistryAbi, evidenceRegistryAbi, licenseEscrowAbi } from './abis';
 import { contractAddresses } from './config';
+import AgreementDashboard from './components/AgreementDashboard';
 
 const zeroBytes32 = '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
 
@@ -466,6 +467,9 @@ function App() {
           {revenueError && <p className="error-text">{revenueError.message}</p>}
         </section>
       </section>
+
+
+      <AgreementDashboard />
 
       <section className="card read-dashboard">
         <div className="section-heading">
