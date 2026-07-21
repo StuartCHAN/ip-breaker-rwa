@@ -20,22 +20,22 @@ contract IdentityRegistry is AccessControl {
     //////////////////////////////////////////////////////////////*/
 
     enum IdentityStatus {
-        None,       // 0: Not registered
-        Pending,    // 1: Application submitted, awaiting verification
-        Verified,   // 2: Active and compliant
-        Suspended,  // 3: Temporarily disabled (expired KYC, investigation)
-        Rejected,   // 4: Application denied (can reapply)
-        Revoked     // 5: Permanently banned (terminal state)
+        None, // 0: Not registered
+        Pending, // 1: Application submitted, awaiting verification
+        Verified, // 2: Active and compliant
+        Suspended, // 3: Temporarily disabled (expired KYC, investigation)
+        Rejected, // 4: Application denied (can reapply)
+        Revoked // 5: Permanently banned (terminal state)
     }
 
     struct Identity {
-        IdentityStatus status;      // Current verification state
-        uint64 createdAt;           // Registration timestamp
-        uint64 verifiedAt;          // Verification timestamp (0 if not verified)
-        uint64 expiresAt;           // KYC expiration (0 = no expiry)
-        uint256 roleMask;           // Bit mask for business roles
-        address verifier;           // Address of verifier who approved
-        string metadataURI;         // IPFS/Arweave link to off-chain KYC docs
+        IdentityStatus status; // Current verification state
+        uint64 createdAt; // Registration timestamp
+        uint64 verifiedAt; // Verification timestamp (0 if not verified)
+        uint64 expiresAt; // KYC expiration (0 = no expiry)
+        uint256 roleMask; // Bit mask for business roles
+        address verifier; // Address of verifier who approved
+        string metadataURI; // IPFS/Arweave link to off-chain KYC docs
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -43,11 +43,11 @@ contract IdentityRegistry is AccessControl {
     //////////////////////////////////////////////////////////////*/
 
     // Business Identity Roles (bit mask)
-    uint256 public constant ROLE_ASSET_OWNER = 1 << 0;  // 0x01
-    uint256 public constant ROLE_LICENSEE    = 1 << 1;  // 0x02
-    uint256 public constant ROLE_INVESTOR    = 1 << 2;  // 0x04
-    uint256 public constant ROLE_VERIFIER    = 1 << 3;  // 0x08
-    uint256 public constant ROLE_ARBITRATOR  = 1 << 4;  // 0x10
+    uint256 public constant ROLE_ASSET_OWNER = 1 << 0; // 0x01
+    uint256 public constant ROLE_LICENSEE = 1 << 1; // 0x02
+    uint256 public constant ROLE_INVESTOR = 1 << 2; // 0x04
+    uint256 public constant ROLE_VERIFIER = 1 << 3; // 0x08
+    uint256 public constant ROLE_ARBITRATOR = 1 << 4; // 0x10
 
     // System Permission Roles (AccessControl)
     bytes32 public constant VERIFIER_MANAGER_ROLE = keccak256("VERIFIER_MANAGER");
@@ -63,41 +63,17 @@ contract IdentityRegistry is AccessControl {
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event IdentityRegistered(
-        address indexed account,
-        uint256 timestamp,
-        uint256 requestedRoles
-    );
+    event IdentityRegistered(address indexed account, uint256 timestamp, uint256 requestedRoles);
 
-    event IdentityVerified(
-        address indexed account,
-        address indexed verifier,
-        uint256 grantedRoles,
-        uint64 expiresAt
-    );
+    event IdentityVerified(address indexed account, address indexed verifier, uint256 grantedRoles, uint64 expiresAt);
 
-    event IdentityRejected(
-        address indexed account,
-        address indexed verifier,
-        string reason
-    );
+    event IdentityRejected(address indexed account, address indexed verifier, string reason);
 
-    event IdentitySuspended(
-        address indexed account,
-        address indexed actor,
-        string reason
-    );
+    event IdentitySuspended(address indexed account, address indexed actor, string reason);
 
-    event IdentityRestored(
-        address indexed account,
-        address indexed actor
-    );
+    event IdentityRestored(address indexed account, address indexed actor);
 
-    event IdentityRevoked(
-        address indexed account,
-        address indexed admin,
-        string reason
-    );
+    event IdentityRevoked(address indexed account, address indexed admin, string reason);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -131,10 +107,7 @@ contract IdentityRegistry is AccessControl {
      * @param metadataURI IPFS link to encrypted KYC documents
      * @param requestedRoles Bit mask of roles being applied for
      */
-    function registerIdentity(
-        string calldata metadataURI,
-        uint256 requestedRoles
-    ) external {
+    function registerIdentity(string calldata metadataURI, uint256 requestedRoles) external {
         Identity storage identity = identities[msg.sender];
 
         // Allow re-registration only from Rejected status or first-time registration
@@ -160,11 +133,10 @@ contract IdentityRegistry is AccessControl {
      * @param grantedRoles Bit mask of roles to grant (may differ from requested)
      * @param expiresAt KYC expiration timestamp (0 = no expiry)
      */
-    function verifyIdentity(
-        address account,
-        uint256 grantedRoles,
-        uint64 expiresAt
-    ) external onlyRole(VERIFIER_MANAGER_ROLE) {
+    function verifyIdentity(address account, uint256 grantedRoles, uint64 expiresAt)
+        external
+        onlyRole(VERIFIER_MANAGER_ROLE)
+    {
         Identity storage identity = identities[account];
 
         if (identity.status != IdentityStatus.Pending) {
@@ -196,10 +168,7 @@ contract IdentityRegistry is AccessControl {
      * @param account Address to reject
      * @param reason Human-readable rejection reason
      */
-    function rejectIdentity(
-        address account,
-        string calldata reason
-    ) external onlyRole(VERIFIER_MANAGER_ROLE) {
+    function rejectIdentity(address account, string calldata reason) external onlyRole(VERIFIER_MANAGER_ROLE) {
         Identity storage identity = identities[account];
 
         if (identity.status != IdentityStatus.Pending) {
@@ -220,10 +189,7 @@ contract IdentityRegistry is AccessControl {
      * @param account Address to suspend
      * @param reason Suspension reason (expired KYC, investigation)
      */
-    function suspendIdentity(
-        address account,
-        string calldata reason
-    ) external onlyRole(VERIFIER_MANAGER_ROLE) {
+    function suspendIdentity(address account, string calldata reason) external onlyRole(VERIFIER_MANAGER_ROLE) {
         Identity storage identity = identities[account];
 
         if (identity.status != IdentityStatus.Verified) {
@@ -257,10 +223,7 @@ contract IdentityRegistry is AccessControl {
      * @param reason Revocation reason (fraud, sanctions)
      * @dev Terminal state: cannot transition out of Revoked
      */
-    function revokeIdentity(
-        address account,
-        string calldata reason
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function revokeIdentity(address account, string calldata reason) external onlyRole(DEFAULT_ADMIN_ROLE) {
         Identity storage identity = identities[account];
 
         // Can revoke from Verified or Suspended, but not from terminal state
@@ -268,7 +231,7 @@ contract IdentityRegistry is AccessControl {
             revert CannotEscapeRevokedStatus();
         }
 
-        if (identity.status == IdentityStatus.None || identity.status == IdentityStatus.Pending) {
+        if (identity.status != IdentityStatus.Verified && identity.status != IdentityStatus.Suspended) {
             revert NotInVerifiedStatus();
         }
 
@@ -296,7 +259,7 @@ contract IdentityRegistry is AccessControl {
         }
 
         // Check expiration (0 = no expiry)
-        if (identity.expiresAt != 0 && block.timestamp > identity.expiresAt) {
+        if (identity.expiresAt != 0 && block.timestamp >= identity.expiresAt) {
             return false;
         }
 
@@ -317,7 +280,7 @@ contract IdentityRegistry is AccessControl {
         }
 
         // Check expiration (0 = no expiry)
-        if (identity.expiresAt != 0 && block.timestamp > identity.expiresAt) {
+        if (identity.expiresAt != 0 && block.timestamp >= identity.expiresAt) {
             return false;
         }
 

@@ -429,6 +429,17 @@ contract IdentityRegistryTest is Test {
         registry.revokeIdentity(user1, REVOCATION_REASON);
     }
 
+    function testCannotRevokeRejectedIdentity() public {
+        vm.prank(user1);
+        registry.registerIdentity(METADATA_URI, ROLE_ASSET_OWNER);
+
+        vm.prank(verifier);
+        registry.rejectIdentity(user1, REJECTION_REASON);
+
+        vm.expectRevert(IdentityRegistry.NotInVerifiedStatus.selector);
+        registry.revokeIdentity(user1, REVOCATION_REASON);
+    }
+
     function testRevokedIdentityCannotBeRestored() public {
         vm.prank(user1);
         registry.registerIdentity(METADATA_URI, ROLE_ASSET_OWNER);
@@ -485,6 +496,21 @@ contract IdentityRegistryTest is Test {
         // Status is still Verified, but isVerified() returns false
         IdentityRegistry.Identity memory identity = registry.getIdentity(user1);
         assertEq(uint256(identity.status), uint256(IdentityRegistry.IdentityStatus.Verified));
+    }
+
+    function testIdentityExpiresAtExactExpiryTimestamp() public {
+        vm.prank(user1);
+        registry.registerIdentity(METADATA_URI, ROLE_ASSET_OWNER);
+
+        uint64 expiresAt = uint64(block.timestamp + 365 days);
+
+        vm.prank(verifier);
+        registry.verifyIdentity(user1, ROLE_ASSET_OWNER, expiresAt);
+
+        vm.warp(expiresAt);
+
+        assertFalse(registry.isVerified(user1));
+        assertFalse(registry.hasBusinessRole(user1, ROLE_ASSET_OWNER));
     }
 
     function testZeroExpiresAtMeansNoExpiry() public {
