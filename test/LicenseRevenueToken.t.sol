@@ -285,7 +285,7 @@ contract LicenseRevenueTokenTest is Test {
         _activateWithAliceHoldingFinalSupply();
         eligibility.setEligible(assetId, alice, false);
         eligibility.setEligible(assetId, bob, true);
-        uint256 amount = 250 ether;
+        uint256 amount = FINAL_SUPPLY;
 
         vm.expectEmit(true, true, true, true, address(token));
         emit TokensRecovered(alice, bob, amount, controller);
@@ -297,6 +297,21 @@ contract LicenseRevenueTokenTest is Test {
         assertEq(token.balanceOf(bob), amount);
         assertEq(token.totalSupply(), FINAL_SUPPLY);
         assertEq(revenueVault.checkpointCount(), 2);
+    }
+
+    function testControllerRecoveryRejectsPartialBalance() public {
+        _activateWithAliceHoldingFinalSupply();
+        eligibility.setEligible(assetId, bob, true);
+
+        vm.prank(controller);
+        vm.expectRevert(
+            abi.encodeWithSelector(LicenseRevenueToken.RecoveryRequiresFullBalance.selector, 250 ether, FINAL_SUPPLY)
+        );
+        token.recoverTokens(alice, bob, 250 ether);
+
+        assertEq(token.balanceOf(alice), FINAL_SUPPLY);
+        assertEq(token.balanceOf(bob), 0);
+        assertEq(revenueVault.checkpointCount(), 1);
     }
 
     function testUnauthorizedRecoveryRejected() public {

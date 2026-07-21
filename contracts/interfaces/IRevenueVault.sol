@@ -9,4 +9,8 @@ interface IRevenueVault {
     /// @notice Settles affected accounts and records debt for their projected post-update balances.
     /// @dev Must be called by the bound revenue token before its ERC-20 balance update.
     function checkpointTransfer(address from, address to, uint256 amount) external;
+
+    /// @notice Settles both accounts and migrates all source pending rewards to the destination.
+    /// @dev Must be called by the bound revenue token before a full-balance recovery update.
+    function checkpointRecovery(address source, address destination, uint256 amount) external;
 }

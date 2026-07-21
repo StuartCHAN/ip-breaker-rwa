@@ -51,6 +51,8 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     error RevenueVaultNotBound();
     error RevenueVaultTokenMismatch(address expectedToken, address actualToken);
     error ReentrantCheckpoint();
+    error ZeroRecoveryBalance(address account);
+    error RecoveryRequiresFullBalance(uint256 requested, uint256 available);
 
     event LifecycleChanged(Lifecycle indexed previousLifecycle, Lifecycle indexed newLifecycle);
     event TokensRecovered(address indexed from, address indexed to, uint256 amount, address indexed controller);
@@ -127,12 +129,15 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     }
 
     /// @notice Moves tokens from an inaccessible/ineligible account without changing supply.
-    /// @dev This is the only A1 recovery path. Phase 3.1-A2 must add RevenueVault checkpoints
-    ///      to this path before revenue accounting is activated.
+    /// @dev Phase 3.1-B2-B1 supports controlled full-balance accounting migration only.
     function recoverTokens(address from, address to, uint256 amount) external onlyRole(TOKEN_CONTROLLER_ROLE) {
         if (from == address(0)) revert InvalidRecoveryAccount(from);
         if (to == address(0) || to == from) revert InvalidRecoveryAccount(to);
         if (!_canHold(to)) revert IneligibleInvestor(to);
+
+        uint256 sourceBalance = balanceOf(from);
+        if (sourceBalance == 0) revert ZeroRecoveryBalance(from);
+        if (amount != sourceBalance) revert RecoveryRequiresFullBalance(amount, sourceBalance);
 
         uint256 supplyBefore = totalSupply();
 
@@ -165,7 +170,11 @@ contract LicenseRevenueToken is ERC20, AccessControl {
 
         if (_checkpointInProgress) revert ReentrantCheckpoint();
         _checkpointInProgress = true;
-        vault.checkpointTransfer(from, to, value);
+        if (_recoveryInProgress) {
+            vault.checkpointRecovery(from, to, value);
+        } else {
+            vault.checkpointTransfer(from, to, value);
+        }
         _checkpointInProgress = false;
 
         super._update(from, to, value);

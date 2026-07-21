@@ -42,12 +42,18 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
     error VaultInsolvent(uint256 actualBalance, uint256 accountedBalance);
     error OnlyRevenueToken(address caller);
     error InsufficientCheckpointBalance(address account, uint256 balance, uint256 amount);
+    error InvalidRecoveryAccounts(address source, address destination);
+    error RecoveryRequiresFullBalance(uint256 requested, uint256 available);
+    error ZeroRecoveryBalance();
 
     event RevenueDeposited(
         address indexed depositor, uint256 amount, uint256 accumulatedRewardPerShare, uint256 precisionRemainder
     );
     event RevenueClaimed(address indexed account, uint256 amount, uint256 totalClaimed);
     event TransferCheckpointed(address indexed from, address indexed to, uint256 amount);
+    event RevenueStateMigrated(
+        address indexed source, address indexed destination, uint256 tokenAmount, uint256 pendingRewardAmount
+    );
 
     constructor(address revenueToken_, address settlementToken_, address admin_, address depositor_) {
         if (revenueToken_ == address(0)) revert ZeroRevenueToken();
@@ -115,6 +121,40 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
         }
 
         emit TransferCheckpointed(from, to, amount);
+    }
+
+    /// @inheritdoc IRevenueVault
+    function checkpointRecovery(address source, address destination, uint256 amount) external nonReentrant {
+        if (msg.sender != address(revenueToken)) revert OnlyRevenueToken(msg.sender);
+        if (source == address(0) || destination == address(0) || source == destination) {
+            revert InvalidRecoveryAccounts(source, destination);
+        }
+
+        uint256 sourceBalance = revenueToken.balanceOf(source);
+        if (sourceBalance == 0) revert ZeroRecoveryBalance();
+        if (amount != sourceBalance) revert RecoveryRequiresFullBalance(amount, sourceBalance);
+
+        uint256 destinationBalance = revenueToken.balanceOf(destination);
+        uint256 depositedBefore = totalDeposited;
+        uint256 claimedBefore = totalClaimed;
+        uint256 settlementBalanceBefore = settlementToken.balanceOf(address(this));
+
+        _accrueWithBalance(source, sourceBalance);
+        _accrueWithBalance(destination, destinationBalance);
+
+        uint256 migratedPending = pendingReward[source];
+        pendingReward[source] = 0;
+        pendingReward[destination] += migratedPending;
+
+        rewardDebt[source] = 0;
+        rewardDebt[destination] = _accumulatedFor(destinationBalance + sourceBalance);
+
+        assert(totalDeposited == depositedBefore);
+        assert(totalClaimed == claimedBefore);
+        assert(settlementToken.balanceOf(address(this)) == settlementBalanceBefore);
+        _requireSolvent();
+
+        emit RevenueStateMigrated(source, destination, amount, migratedPending);
     }
 
     /// @notice Pulls all revenue currently accrued to the caller.
