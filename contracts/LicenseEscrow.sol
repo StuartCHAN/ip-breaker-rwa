@@ -5,6 +5,7 @@ import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
 import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 
 /// @title LicenseEscrow
@@ -77,6 +78,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     // ============ Errors: existing offer/license NFT flow ============
 
     error ZeroAssetRegistry();
+    error ZeroIdentityRegistry();
     error AssetDoesNotExist(uint256 assetId);
     error NotAssetOwner(uint256 assetId, address caller);
     error OfferDoesNotExist(uint256 offerId);
@@ -104,6 +106,8 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     error IncorrectLicenseFee(uint256 expected, uint256 actual);
     error ZeroLicenseFee();
     error InvalidLicensee();
+    error NotVerifiedLicensor(address licensor);
+    error NotVerifiedLicensee(address licensee);
     error ZeroArbiter();
 
     // ============ Events: existing offer/license NFT flow ============
@@ -164,6 +168,7 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
     // ============ Storage ============
 
     IIPAssetRegistry public immutable assetRegistry;
+    IIdentityRegistry public immutable identityRegistry;
 
     uint256 private _nextOfferId = 1;
     uint256 private _nextLicenseId = 1;
@@ -179,9 +184,14 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
 
     mapping(uint256 agreementId => LicenseAgreement agreement) public agreements;
 
-    constructor(address assetRegistry_) ERC721("IP Breaker License", "IPBL") Ownable(msg.sender) {
+    constructor(address assetRegistry_, address identityRegistry_)
+        ERC721("IP Breaker License", "IPBL")
+        Ownable(msg.sender)
+    {
         if (assetRegistry_ == address(0)) revert ZeroAssetRegistry();
+        if (identityRegistry_ == address(0)) revert ZeroIdentityRegistry();
         assetRegistry = IIPAssetRegistry(assetRegistry_);
+        identityRegistry = IIdentityRegistry(identityRegistry_);
 
         // Arbiter defaults to the deployer and can be reassigned later via setArbiter().
         // Kept out of the constructor signature so existing deployments/tests are unaffected.
@@ -345,6 +355,17 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
             revert NotAssetOwner(assetId, msg.sender);
         }
         if (licensee == address(0) || licensee == msg.sender) revert InvalidLicensee();
+
+        uint256 assetOwnerRole = identityRegistry.ROLE_ASSET_OWNER();
+        if (!identityRegistry.hasBusinessRole(msg.sender, assetOwnerRole)) {
+            revert NotVerifiedLicensor(msg.sender);
+        }
+
+        uint256 licenseeRole = identityRegistry.ROLE_LICENSEE();
+        if (!identityRegistry.hasBusinessRole(licensee, licenseeRole)) {
+            revert NotVerifiedLicensee(licensee);
+        }
+
         if (licenseFee == 0) revert ZeroLicenseFee();
         if (termsHash == bytes32(0)) revert ZeroTermsHash();
         if (bytes(termsURI).length == 0) revert EmptyTermsURI();
@@ -379,6 +400,12 @@ contract LicenseEscrow is ERC721, Ownable, ReentrancyGuard {
         LicenseAgreement storage agreement = _getExistingAgreement(agreementId);
 
         if (msg.sender != agreement.licensee) revert NotLicensee(agreementId, msg.sender);
+
+        uint256 licenseeRole = identityRegistry.ROLE_LICENSEE();
+        if (!identityRegistry.hasBusinessRole(msg.sender, licenseeRole)) {
+            revert NotVerifiedLicensee(msg.sender);
+        }
+
         if (msg.value != agreement.licenseFee) {
             revert IncorrectLicenseFee(agreement.licenseFee, msg.value);
         }

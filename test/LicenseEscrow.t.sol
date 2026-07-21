@@ -53,7 +53,7 @@ contract LicenseEscrowTest is Test {
 
     function setUp() public {
         assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
-        licenseEscrow = new LicenseEscrow(address(assetRegistry));
+        licenseEscrow = new LicenseEscrow(address(assetRegistry), address(assetRegistry.identityRegistry()));
 
         vm.deal(bob, 10 ether);
         vm.deal(carol, 10 ether);
@@ -64,8 +64,9 @@ contract LicenseEscrowTest is Test {
     }
 
     function testConstructorRevertsWhenAssetRegistryIsZero() public {
+        address identityRegistry = address(assetRegistry.identityRegistry());
         vm.expectRevert(LicenseEscrow.ZeroAssetRegistry.selector);
-        new LicenseEscrow(address(0));
+        new LicenseEscrow(address(0), identityRegistry);
     }
 
     function testCreateLicenseOfferStoresOffer() public {

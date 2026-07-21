@@ -30,7 +30,7 @@ contract LicenseEscrowSecurityTest is Test {
 
     function setUp() public {
         assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
-        licenseEscrow = new LicenseEscrow(address(assetRegistry));
+        licenseEscrow = new LicenseEscrow(address(assetRegistry), address(assetRegistry.identityRegistry()));
 
         vm.deal(bob, 10 ether);
     }

@@ -26,7 +26,7 @@ contract LicenseEscrowInvariantTest is Test {
 
     function setUp() public {
         assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
-        licenseEscrow = new LicenseEscrow(address(assetRegistry));
+        licenseEscrow = new LicenseEscrow(address(assetRegistry), address(assetRegistry.identityRegistry()));
         handler = new Handler(assetRegistry, licenseEscrow);
 
         // Only fuzz calls through the Handler's bounded entry points — not arbitrary calls

@@ -54,7 +54,7 @@ contract LicenseEscrowAgreementTest is Test {
 
     function setUp() public {
         assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
-        licenseEscrow = new LicenseEscrow(address(assetRegistry));
+        licenseEscrow = new LicenseEscrow(address(assetRegistry), address(assetRegistry.identityRegistry()));
 
         // Test contract is the deployer -> owner -> default arbiter. Reassign to `dave`
         // so arbitration tests exercise a distinct third party, like a real deployment would.

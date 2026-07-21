@@ -50,7 +50,7 @@ contract IntegrationTest is Test {
     function setUp() public {
         assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
         evidenceRegistry = new EvidenceRegistry(address(assetRegistry), address(assetRegistry.identityRegistry()));
-        licenseEscrow = new LicenseEscrow(address(assetRegistry));
+        licenseEscrow = new LicenseEscrow(address(assetRegistry), address(assetRegistry.identityRegistry()));
 
         vm.deal(bob, 1 ether);
         vm.deal(carol, 1 ether);
