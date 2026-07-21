@@ -289,21 +289,151 @@ function release(uint256 agreementId) external nonReentrant {
 
 ## 6. Known Limitations (Documented, Not Vulnerabilities)
 
-### 6.1 No Timeout Mechanism
-
-**Issue:**  
-If licensor never confirms performance or arbiter never resolves dispute, funds remain locked indefinitely.
-
-**Risk Level:** Medium (user trust required)
-
-**Mitigation (Future):**  
-- Add `fundedAt + timeout` deadline
-- Allow licensee to reclaim after timeout
-- Add arbiter inactivity fallback
+The following limitations are **acknowledged and acceptable** for the v0.2 MVP scope. Each represents a **future learning opportunity** in later protocol phases:
 
 ---
 
-### 6.2 Block Timestamp Manipulation
+### 6.1 Push Payment Model → Phase 5 Learning Point
+
+**Current Implementation:**
+```solidity
+(bool success,) = licensor.call{value: amount}("");
+require(success, "Transfer failed");
+```
+
+**Known Risk:** If the licensor contract rejects ETH via a reverting `receive()`/`fallback()`, the entire transaction reverts, locking funds in escrow.
+
+**Mitigation Status:**
+- ✅ **Test Coverage**: `testReleaseRevertsAndRollsBackWhenLicensorRejectsETH()` (line 435) validates revert behavior
+- ✅ **State Rollback**: All state changes revert atomically (CEI pattern ensures no partial state)
+- ⚠️ **Funds Locked**: Agreement remains in Active state with funds stuck
+
+**Why Not Fixed Now:**
+- Pull Payment pattern (record `claimable[address]` + separate `withdraw()`) adds complexity
+- This is a **Phase 5 learning objective** (Revenue Distribution & Fractional Ownership)
+- MVP prioritizes happy-path licensing flow over edge-case recovery
+
+**Future Solution (Phase 5):**
+```solidity
+// Pull Payment Pattern
+mapping(address => uint256) public claimable;
+
+function release() external {
+    // ... state transitions ...
+    claimable[licensor] += amount;  // Record, don't transfer
+    emit PaymentRecorded(licensor, amount);
+}
+
+function withdraw() external {
+    uint256 amount = claimable[msg.sender];
+    claimable[msg.sender] = 0;
+    (bool success,) = msg.sender.call{value: amount}("");
+    require(success, "Withdrawal failed");
+}
+```
+
+---
+
+### 6.2 Timeout Mechanism Absence → Phase 6 Learning Point
+
+**Current Implementation:**
+- State machine transitions are **entirely manual** (require explicit function calls)
+- No automatic progression based on time
+
+**Known Risk:**
+| State | Risk | Impact |
+|-------|------|--------|
+| `Funded` | Licensor never calls `activate()` | Licensee's funds locked, no license granted |
+| `Active` | Neither party acts on performance issues | No automatic expiration |
+| `Disputed` | No resolution deadline | Funds locked indefinitely |
+
+**Mitigation Status:**
+- ✅ **Licensee Protection**: Can call `dispute()` to trigger resolution process
+- ⚠️ **No Deadline Enforcement**: Relies on off-chain coordination
+
+**Why Not Fixed Now:**
+- Timeout handling requires deadline storage, time-based validation, and fallback resolution logic
+- This is a **Phase 6 learning objective** (Dispute Resolution & Default Handling)
+- MVP assumes cooperative participants
+
+**Future Solution (Phase 6):**
+```solidity
+struct Agreement {
+    // ... existing fields ...
+    uint64 fundingDeadline;      // Auto-refund if not activated
+    uint64 performanceDeadline;  // Auto-dispute if not released
+    uint64 disputeDeadline;      // Auto-resolve with default outcome
+}
+
+function checkTimeout(uint256 agreementId) external {
+    Agreement storage agreement = agreements[agreementId];
+    
+    if (agreement.status == Status.Funded && 
+        block.timestamp > agreement.fundingDeadline) {
+        _refund(agreementId);  // Auto-cancel
+    }
+    
+    if (agreement.status == Status.Active && 
+        block.timestamp > agreement.performanceDeadline) {
+        _initiateDispute(agreementId);  // Auto-escalate
+    }
+    
+    // ... dispute timeout logic ...
+}
+```
+
+---
+
+### 6.3 Identity Verification Absence → Phase 2 Objective
+
+**Current Implementation:**
+```solidity
+function createAgreement(...) external returns (uint256) {
+    // Direct address usage, no identity checks
+    licensor = msg.sender;
+}
+```
+
+**Known Risk:**
+- No KYC/AML compliance validation
+- No role-based access control
+- Cannot distinguish between verified IP owners and unverified addresses
+
+**Why This is Phase 2:**
+- Identity Registry is the **next immediate design task**
+- Requires mapping real-world compliance requirements to on-chain permission models
+- Not a "limitation" but a planned architectural addition
+
+**Phase 2 Design Objectives:**
+1. Role taxonomy (AssetOwner, Licensee, Investor, Verifier)
+2. Identity status lifecycle (None → Pending → Verified → Suspended/Revoked)
+3. Bit mask-based permission model
+4. Integration points with existing contracts
+
+**Future Integration (Phase 2):**
+```solidity
+import "./IdentityRegistry.sol";
+
+contract LicenseEscrow {
+    IdentityRegistry public identityRegistry;
+    
+    function createAgreement(...) external returns (uint256) {
+        require(
+            identityRegistry.hasRole(msg.sender, Role.AssetOwner),
+            "Licensor not verified"
+        );
+        require(
+            identityRegistry.isVerified(licensee),
+            "Licensee not verified"
+        );
+        // ... rest of function ...
+    }
+}
+```
+
+---
+
+### 6.4 Block Timestamp Dependency
 
 **Solidity Warning:**
 ```text
@@ -313,24 +443,14 @@ may be manipulated by validators
 
 **Location:** `isLicenseValid()` uses `block.timestamp` for expiry check
 
-**Assessment:** ✅ Acceptable for MVP  
-- Used for license expiry (not MEV-sensitive)
-- Not used for randomness or auction ordering
-- Validator manipulation window (~15 seconds) is negligible for license durations (days/months)
+**Risk Assessment:**
+- ✅ **Low Impact**: Timestamps used for record-keeping, not critical security decisions
+- ✅ **No Financial Impact**: No time-based payment calculations in v0.2
+- ✅ **Industry Standard**: Widely used in production DeFi protocols
 
----
-
-### 6.3 Push Payment Model
-
-**Issue:**  
-If recipient rejects ETH, transaction reverts and funds remain locked.
-
-**Assessment:** ✅ Acceptable for v0.2  
-- Rejecting payments is anti-pattern (unusual)
-- Pull payment pattern adds complexity
-- Documented limitation for MVP
-
-**Future Improvement:** Consider pull-payment via `PullPayment` pattern or ERC20 settlement.
+**Mitigation:**
+- Phase 6 timeout mechanisms will use block number deltas where critical
+- Current usage (audit trail timestamps) acceptable with miner tolerance (~15 seconds)
 
 ---
 
