@@ -158,6 +158,7 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     }
 
     /// @notice Migrates one source account's complete balance under an authorized recovery request.
+    /// @dev The Vault reward-state migration executes before the ERC-20 balance update in the same transaction.
     function executeRecoveryMigration(bytes32 recoveryId, address source, address destination) external {
         IRecoveryManager manager = recoveryManager;
         if (msg.sender != address(manager)) revert OnlyRecoveryManager(msg.sender);

@@ -363,6 +363,22 @@ contract LicenseRevenueTokenTest is Test {
         assertEq(token.balanceOf(bob), FINAL_SUPPLY);
     }
 
+    function testRecoveryCheckpointFailureRollsBackEntireMigration() public {
+        _activateWithAliceHoldingFinalSupply();
+        eligibility.setEligible(assetId, bob, true);
+        bytes32 recoveryId = keccak256("failed-vault-recovery");
+        recoveryManager.authorize(recoveryId, address(token), alice, bob);
+        revenueVault.setCheckpointShouldRevert(true);
+
+        vm.expectRevert(MockRevenueVault.CheckpointFailed.selector);
+        recoveryManager.execute(address(token), recoveryId, alice, bob);
+
+        assertEq(token.balanceOf(alice), FINAL_SUPPLY);
+        assertEq(token.balanceOf(bob), 0);
+        assertEq(token.totalSupply(), FINAL_SUPPLY);
+        assertFalse(token.executedRecovery(recoveryId));
+    }
+
     function testNoPublicBurnFunction() public {
         _activateWithAliceHoldingFinalSupply();
 

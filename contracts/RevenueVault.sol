@@ -11,7 +11,7 @@ import {IRevenueVault} from "./interfaces/IRevenueVault.sol";
 
 /// @title RevenueVault
 /// @notice Holds and distributes one ERC-20 settlement asset to holders of one revenue token.
-/// @dev Recovery-ledger migration remains intentionally deferred after Phase 3.1-B2-A.
+/// @dev Token-led recovery checkpoints atomically migrate both accrued rewards and reward debt.
 contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
     using SafeERC20 for IERC20;
 
@@ -152,6 +152,8 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
         assert(totalDeposited == depositedBefore);
         assert(totalClaimed == claimedBefore);
         assert(settlementToken.balanceOf(address(this)) == settlementBalanceBefore);
+        assert(pendingReward[source] == 0);
+        assert(rewardDebt[source] == 0);
         _requireSolvent();
 
         emit RevenueStateMigrated(source, destination, amount, migratedPending);
