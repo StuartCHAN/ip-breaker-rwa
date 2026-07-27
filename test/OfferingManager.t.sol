@@ -62,6 +62,7 @@ contract OfferingManagerTest is Test {
         bytes32 termsHash
     );
     event OfferingOpened(bytes32 indexed offeringId, address indexed operator, uint64 openedAt);
+    event DraftExpired(bytes32 indexed offeringId, address indexed caller, uint64 expiredAt);
     event OfferingStatusChanged(
         bytes32 indexed offeringId,
         OfferingManager.OfferingStatus indexed previousStatus,
@@ -255,6 +256,163 @@ contract OfferingManagerTest is Test {
         vm.prank(outsider);
         vm.expectRevert();
         manager.openOffering(offeringId);
+    }
+
+    function testDraftCannotExpireBeforeClose() public {
+        bytes32 offeringId = _createOffering();
+        uint64 closesAt = manager.getOffering(offeringId).config.closesAt;
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(OfferingManager.DraftNotExpired.selector, block.timestamp, closesAt));
+        manager.expireDraft(offeringId);
+
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        assertEq(uint256(offering.status), uint256(OfferingManager.OfferingStatus.Draft));
+        assertEq(uint256(offering.failureReason), uint256(OfferingManager.OfferingFailureReason.None));
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Reserved)
+        );
+        assertEq(programRegistry.liveOfferingByAsset(ASSET_ID), offeringId);
+    }
+
+    function testExpiredDraftCanBePermissionlesslyClosedWithoutTouchingEscrows() public {
+        bytes32 offeringId = _createOffering();
+        uint64 closesAt = manager.getOffering(offeringId).config.closesAt;
+        vm.warp(closesAt);
+
+        vm.expectEmit(true, true, false, true, address(manager));
+        emit DraftExpired(offeringId, outsider, closesAt);
+        vm.expectEmit(true, true, true, true, address(manager));
+        emit OfferingStatusChanged(
+            offeringId, OfferingManager.OfferingStatus.Draft, OfferingManager.OfferingStatus.Failed
+        );
+        vm.prank(outsider);
+        manager.expireDraft(offeringId);
+
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        assertEq(uint256(offering.status), uint256(OfferingManager.OfferingStatus.Failed));
+        assertEq(uint256(offering.failureReason), uint256(OfferingManager.OfferingFailureReason.DraftExpired));
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Failed)
+        );
+        assertEq(programRegistry.liveOfferingByAsset(ASSET_ID), bytes32(0));
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Created));
+        assertEq(revenueToken.totalSupply(), 0);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), 0);
+        assertEq(offeringEscrow.totalContributed(), 0);
+        assertFalse(offeringEscrow.refundable());
+        assertFalse(allocationEscrow.depositConfirmed());
+        assertFalse(allocationEscrow.tombstoned());
+    }
+
+    function testExpiredDraftCannotOpenSubscribeOrExpireTwice() public {
+        bytes32 offeringId = _createOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.expireDraft(offeringId);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.InvalidOfferingStatus.selector,
+                offeringId,
+                OfferingManager.OfferingStatus.Failed,
+                OfferingManager.OfferingStatus.Draft
+            )
+        );
+        manager.openOffering(offeringId);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.InvalidOfferingStatus.selector,
+                offeringId,
+                OfferingManager.OfferingStatus.Failed,
+                OfferingManager.OfferingStatus.Open
+            )
+        );
+        manager.subscribe(offeringId, 1 ether, 0, destination, keccak256("expired-draft"));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.InvalidOfferingStatus.selector,
+                offeringId,
+                OfferingManager.OfferingStatus.Failed,
+                OfferingManager.OfferingStatus.Draft
+            )
+        );
+        manager.expireDraft(offeringId);
+    }
+
+    function testDraftExpiryReleasesAssetForReplacementOffering() public {
+        bytes32 expiredOfferingId = _createOffering();
+        vm.warp(manager.getOffering(expiredOfferingId).config.closesAt);
+        manager.expireDraft(expiredOfferingId);
+
+        OfferingManager.OfferingConfig memory replacement = _validConfig();
+        replacement.opensAt = uint64(block.timestamp + 1 days);
+        replacement.closesAt = uint64(block.timestamp + 8 days);
+        replacement.termsHash = keccak256("replacement-terms");
+        bytes32 replacementOfferingId = _expectedOfferingId(replacement, 1);
+        LicenseRevenueToken replacementToken = new LicenseRevenueToken(
+            "Replacement Revenue",
+            "RPLREV",
+            address(assetRegistry),
+            ASSET_ID,
+            FINAL_SUPPLY,
+            address(investorEligibility),
+            address(manager)
+        );
+        OfferingRevenueVaultMock replacementVault = new OfferingRevenueVaultMock(address(replacementToken));
+        AllocationEscrow replacementAllocationEscrow =
+            new AllocationEscrow(address(manager), replacementOfferingId, address(replacementToken), FINAL_SUPPLY);
+        OfferingEscrow replacementOfferingEscrow = new OfferingEscrow(
+            address(manager), replacementOfferingId, address(usdc), issuerTreasury, feeRecipient, 250
+        );
+        investorEligibility.setEligible(address(replacementAllocationEscrow), ASSET_ID, true);
+        replacement.revenueToken = address(replacementToken);
+        replacement.revenueVault = address(replacementVault);
+        replacement.allocationEscrow = address(replacementAllocationEscrow);
+        replacement.offeringEscrow = address(replacementOfferingEscrow);
+
+        vm.prank(assetOwner);
+        bytes32 actualReplacementId = manager.createOffering(replacement);
+
+        assertEq(actualReplacementId, replacementOfferingId);
+        assertEq(
+            uint256(manager.getOfferingStatus(replacementOfferingId)), uint256(OfferingManager.OfferingStatus.Draft)
+        );
+        assertEq(
+            uint256(programRegistry.getProgram(expiredOfferingId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Failed)
+        );
+        assertEq(
+            uint256(programRegistry.getProgram(replacementOfferingId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Reserved)
+        );
+        assertEq(programRegistry.liveOfferingByAsset(ASSET_ID), replacementOfferingId);
+    }
+
+    function testRegistryFailureRollsBackDraftExpiry() public {
+        bytes32 offeringId = _createOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        bytes32 programManagerRole = programRegistry.PROGRAM_MANAGER_ROLE();
+        vm.prank(admin);
+        programRegistry.revokeRole(programManagerRole, address(manager));
+
+        vm.expectRevert();
+        manager.expireDraft(offeringId);
+
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        assertEq(uint256(offering.status), uint256(OfferingManager.OfferingStatus.Draft));
+        assertEq(uint256(offering.failureReason), uint256(OfferingManager.OfferingFailureReason.None));
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Reserved)
+        );
+        assertEq(programRegistry.liveOfferingByAsset(ASSET_ID), offeringId);
+        assertEq(revenueToken.totalSupply(), 0);
+        assertEq(offeringEscrow.totalContributed(), 0);
     }
 
     function testSuccessfulOpenMintsExactSupplyIntoAllocationEscrow() public {
@@ -832,6 +990,7 @@ contract OfferingManagerTest is Test {
         OfferingManager.Subscription memory subscription =
             manager.getSubscription(manager.subscriptionIdBySequence(offeringId, 0));
         assertEq(uint256(offering.status), uint256(OfferingManager.OfferingStatus.Failed));
+        assertEq(uint256(offering.failureReason), uint256(OfferingManager.OfferingFailureReason.FundingOutcome));
         assertEq(offering.soldSupply, FINAL_SUPPLY);
         assertEq(offering.validSoldSupply, 0);
         assertEq(offering.validCommittedUSDC, 0);

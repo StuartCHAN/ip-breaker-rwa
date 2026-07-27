@@ -41,6 +41,12 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         Remediation
     }
 
+    enum OfferingFailureReason {
+        None,
+        FundingOutcome,
+        DraftExpired
+    }
+
     struct OfferingConfig {
         uint256 assetId;
         address issuer;
@@ -65,6 +71,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
 
     struct Offering {
         OfferingStatus status;
+        OfferingFailureReason failureReason;
         address creator;
         address assetOwner;
         uint64 createdAt;
@@ -143,6 +150,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     error InvalidOfferingStatus(bytes32 offeringId, OfferingStatus current, OfferingStatus required);
     error OfferingNotOpenYet(uint256 currentTime, uint64 opensAt);
     error OfferingWindowClosed(uint256 currentTime, uint64 closesAt);
+    error DraftNotExpired(uint256 currentTime, uint64 closesAt);
     error AssetOwnershipChanged(address expectedOwner, address currentOwner);
     error TokenRegistryMismatch(address expected, address actual);
     error TokenAssetMismatch(uint256 expected, uint256 actual);
@@ -215,6 +223,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         bytes32 termsHash
     );
     event OfferingOpened(bytes32 indexed offeringId, address indexed operator, uint64 openedAt);
+    event DraftExpired(bytes32 indexed offeringId, address indexed caller, uint64 expiredAt);
     event OfferingStatusChanged(
         bytes32 indexed offeringId, OfferingStatus indexed previousStatus, OfferingStatus indexed newStatus
     );
@@ -369,6 +378,23 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
 
         emit OfferingOpened(offeringId, msg.sender, offering.openedAt);
         emit OfferingStatusChanged(offeringId, OfferingStatus.Draft, OfferingStatus.Open);
+    }
+
+    /// @notice Permissionlessly fails a Draft that was never opened before its final funding boundary.
+    function expireDraft(bytes32 offeringId) external nonReentrant {
+        Offering storage offering = _getOffering(offeringId);
+        _requireStatus(offeringId, offering.status, OfferingStatus.Draft);
+        if (block.timestamp < offering.config.closesAt) {
+            revert DraftNotExpired(block.timestamp, offering.config.closesAt);
+        }
+
+        offering.status = OfferingStatus.Failed;
+        offering.failureReason = OfferingFailureReason.DraftExpired;
+        _failRevenueProgram(offeringId, offering.config.assetId);
+
+        uint64 expiredAt = uint64(block.timestamp);
+        emit DraftExpired(offeringId, msg.sender, expiredAt);
+        emit OfferingStatusChanged(offeringId, OfferingStatus.Draft, OfferingStatus.Failed);
     }
 
     function getOffering(bytes32 offeringId) external view returns (Offering memory) {
@@ -654,18 +680,10 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
             emit OfferingSuccessful(offeringId, offering.validSoldSupply, offering.validCommittedUSDC);
         } else {
             offering.status = OfferingStatus.Failed;
+            offering.failureReason = OfferingFailureReason.FundingOutcome;
             IOfferingEscrow(offering.config.offeringEscrow).markRefundable();
             IAllocationEscrow(offering.config.allocationEscrow).tombstone();
-            revenueProgramRegistry.failProgram(offeringId);
-            IRevenueProgramRegistry.RevenueProgram memory program = revenueProgramRegistry.getProgram(offeringId);
-            if (program.status != IRevenueProgramRegistry.ProgramStatus.Failed) {
-                revert RevenueProgramStateMismatch(
-                    offeringId, IRevenueProgramRegistry.ProgramStatus.Failed, program.status
-                );
-            }
-            if (revenueProgramRegistry.liveOfferingByAsset(offering.config.assetId) != bytes32(0)) {
-                revert RevenueProgramBindingMismatch(offeringId);
-            }
+            _failRevenueProgram(offeringId, offering.config.assetId);
             emit OfferingStatusChanged(offeringId, OfferingStatus.Open, OfferingStatus.Failed);
             emit OfferingFailed(offeringId, offering.validSoldSupply, offering.validCommittedUSDC);
         }
@@ -910,6 +928,17 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
                 || program.settlementToken != config.settlementToken
                 || revenueProgramRegistry.liveOfferingByAsset(config.assetId) != offeringId
         ) {
+            revert RevenueProgramBindingMismatch(offeringId);
+        }
+    }
+
+    function _failRevenueProgram(bytes32 offeringId, uint256 assetId) private {
+        revenueProgramRegistry.failProgram(offeringId);
+        IRevenueProgramRegistry.RevenueProgram memory program = revenueProgramRegistry.getProgram(offeringId);
+        if (program.status != IRevenueProgramRegistry.ProgramStatus.Failed) {
+            revert RevenueProgramStateMismatch(offeringId, IRevenueProgramRegistry.ProgramStatus.Failed, program.status);
+        }
+        if (revenueProgramRegistry.liveOfferingByAsset(assetId) != bytes32(0)) {
             revert RevenueProgramBindingMismatch(offeringId);
         }
     }
