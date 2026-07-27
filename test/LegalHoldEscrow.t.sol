@@ -70,6 +70,7 @@ contract LegalHoldEscrowTest is Test {
         manager.registerAllocation(allocationEscrow, subscriptionId, alice, FINAL_SUPPLY, 0);
         manager.setOfferingStatus(OFFERING_ID, 3);
         address position = manager.holdAllocation(allocationEscrow, subscriptionId);
+        assertTrue(legalHoldEscrow.isActivePosition(position));
         manager.activateRevenue(revenueToken, revenueVault);
         _depositRevenue(100 ether);
 
@@ -94,6 +95,7 @@ contract LegalHoldEscrowTest is Test {
 
         ILegalHoldEscrow.LegalHoldPosition memory released = legalHoldEscrow.getPosition(subscriptionId);
         assertEq(uint256(released.status), uint256(ILegalHoldEscrow.PositionStatus.Released));
+        assertFalse(legalHoldEscrow.isActivePosition(position));
         assertEq(released.beneficialOwner, alice);
         assertEq(revenueToken.balanceOf(position), 0);
         assertEq(revenueToken.balanceOf(alice), FINAL_SUPPLY);
@@ -113,6 +115,114 @@ contract LegalHoldEscrowTest is Test {
             )
         );
         manager.releasePosition(legalHoldEscrow, subscriptionId);
+    }
+
+    function testGenericRecoveryRejectsActiveLegalHoldPositionWithoutChangingState() public {
+        bytes32 subscriptionId = keccak256("recovery-isolated-position");
+        bytes32 recoveryId = keccak256("forbidden-legal-hold-recovery");
+        manager.registerAllocation(allocationEscrow, subscriptionId, alice, FINAL_SUPPLY, 0);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+        address position = manager.holdAllocation(allocationEscrow, subscriptionId);
+        manager.activateRevenue(revenueToken, revenueVault);
+        _depositRevenue(100 ether);
+        eligibility.setEligible(bob, ASSET_ID, true);
+        recoveryManager.authorize(recoveryId, address(revenueToken), position, bob);
+
+        uint256 positionBalanceBefore = revenueToken.balanceOf(position);
+        uint256 positionPendingBefore = revenueVault.pendingReward(position);
+        uint256 positionDebtBefore = revenueVault.rewardDebt(position);
+        uint256 destinationPendingBefore = revenueVault.pendingReward(bob);
+        uint256 destinationDebtBefore = revenueVault.rewardDebt(bob);
+        uint256 depositedBefore = revenueVault.totalDeposited();
+        uint256 claimedBefore = revenueVault.totalClaimed();
+        uint256 vaultBalanceBefore = settlementToken.balanceOf(address(revenueVault));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(LicenseRevenueToken.RecoveryOfActiveLegalHoldPositionForbidden.selector, position)
+        );
+        recoveryManager.execute(address(revenueToken), recoveryId, position, bob);
+
+        assertFalse(revenueToken.executedRecovery(recoveryId));
+        assertEq(revenueToken.balanceOf(position), positionBalanceBefore);
+        assertEq(revenueToken.balanceOf(bob), 0);
+        assertEq(revenueToken.totalSupply(), FINAL_SUPPLY);
+        assertEq(revenueVault.pendingReward(position), positionPendingBefore);
+        assertEq(revenueVault.rewardDebt(position), positionDebtBefore);
+        assertEq(revenueVault.pendingReward(bob), destinationPendingBefore);
+        assertEq(revenueVault.rewardDebt(bob), destinationDebtBefore);
+        assertEq(revenueVault.totalDeposited(), depositedBefore);
+        assertEq(revenueVault.totalClaimed(), claimedBefore);
+        assertEq(settlementToken.balanceOf(address(revenueVault)), vaultBalanceBefore);
+        assertTrue(revenueVault.isSolvent());
+        assertTrue(legalHoldEscrow.isActivePosition(position));
+        assertEq(
+            uint256(legalHoldEscrow.getPosition(subscriptionId).status), uint256(ILegalHoldEscrow.PositionStatus.Held)
+        );
+    }
+
+    function testGenericRecoveryOfNormalHolderStillSucceedsWithLegalHoldRegistryBound() public {
+        bytes32 subscriptionId = keccak256("normal-holder-recovery");
+        bytes32 recoveryId = keccak256("normal-holder-recovery-success");
+        manager.registerAllocation(allocationEscrow, subscriptionId, alice, FINAL_SUPPLY, 0);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+        eligibility.setEligible(alice, ASSET_ID, true);
+        manager.releaseAllocation(allocationEscrow, subscriptionId);
+        manager.activateRevenue(revenueToken, revenueVault);
+        _depositRevenue(100 ether);
+        eligibility.setEligible(alice, ASSET_ID, false);
+        eligibility.setEligible(bob, ASSET_ID, true);
+        recoveryManager.authorize(recoveryId, address(revenueToken), alice, bob);
+
+        recoveryManager.execute(address(revenueToken), recoveryId, alice, bob);
+
+        assertTrue(revenueToken.executedRecovery(recoveryId));
+        assertEq(revenueToken.balanceOf(alice), 0);
+        assertEq(revenueToken.balanceOf(bob), FINAL_SUPPLY);
+        assertEq(revenueToken.totalSupply(), FINAL_SUPPLY);
+        assertEq(revenueVault.claimable(alice), 0);
+        assertEq(revenueVault.claimable(bob), 100 ether);
+        assertEq(revenueVault.totalDeposited(), 100 ether);
+        assertEq(revenueVault.totalClaimed(), 0);
+        assertTrue(revenueVault.isSolvent());
+    }
+
+    function testFuzzGenericRecoveryCannotMoveActiveLegalHoldPosition(uint96 revenueAmount) public {
+        revenueAmount = uint96(bound(revenueAmount, 1, type(uint96).max));
+        bytes32 subscriptionId = keccak256("fuzz-isolated-position");
+        bytes32 recoveryId = keccak256(abi.encode("fuzz-forbidden-recovery", revenueAmount));
+        manager.registerAllocation(allocationEscrow, subscriptionId, alice, FINAL_SUPPLY, 0);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+        address position = manager.holdAllocation(allocationEscrow, subscriptionId);
+        manager.activateRevenue(revenueToken, revenueVault);
+        _depositRevenue(revenueAmount);
+        eligibility.setEligible(bob, ASSET_ID, true);
+        recoveryManager.authorize(recoveryId, address(revenueToken), position, bob);
+
+        uint256 claimableBefore = revenueVault.claimable(position);
+        uint256 pendingBefore = revenueVault.pendingReward(position);
+        uint256 debtBefore = revenueVault.rewardDebt(position);
+        uint256 vaultBalanceBefore = settlementToken.balanceOf(address(revenueVault));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(LicenseRevenueToken.RecoveryOfActiveLegalHoldPositionForbidden.selector, position)
+        );
+        recoveryManager.execute(address(revenueToken), recoveryId, position, bob);
+
+        assertFalse(revenueToken.executedRecovery(recoveryId));
+        assertEq(revenueToken.balanceOf(position), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(bob), 0);
+        assertEq(revenueToken.totalSupply(), FINAL_SUPPLY);
+        assertEq(revenueVault.claimable(position), claimableBefore);
+        assertEq(revenueVault.pendingReward(position), pendingBefore);
+        assertEq(revenueVault.rewardDebt(position), debtBefore);
+        assertEq(revenueVault.totalDeposited(), revenueAmount);
+        assertEq(revenueVault.totalClaimed(), 0);
+        assertEq(settlementToken.balanceOf(address(revenueVault)), vaultBalanceBefore);
+        assertTrue(revenueVault.isSolvent());
+        assertTrue(legalHoldEscrow.isActivePosition(position));
+        assertEq(
+            uint256(legalHoldEscrow.getPosition(subscriptionId).status), uint256(ILegalHoldEscrow.PositionStatus.Held)
+        );
     }
 
     function testMultiplePositionsRemainEconomicallyIsolated() public {
@@ -234,6 +344,10 @@ contract LegalHoldManagerHarness {
         return escrow.holdAllocation(subscriptionId);
     }
 
+    function releaseAllocation(AllocationEscrow escrow, bytes32 subscriptionId) external {
+        escrow.releaseAllocation(subscriptionId);
+    }
+
     function releasePosition(ILegalHoldEscrow escrow, bytes32 subscriptionId) external {
         escrow.releasePosition(subscriptionId);
     }
@@ -268,8 +382,22 @@ contract LegalHoldEligibilityMock is IInvestorEligibility {
 }
 
 contract LegalHoldRecoveryManagerMock is IRecoveryManager {
-    function isExecutionAuthorized(bytes32, address, address, address) external pure returns (bool) {
-        return false;
+    mapping(bytes32 recoveryId => bytes32 parameterHash) private _authorization;
+
+    function authorize(bytes32 recoveryId, address token, address source, address destination) external {
+        _authorization[recoveryId] = keccak256(abi.encode(token, source, destination));
+    }
+
+    function execute(address token, bytes32 recoveryId, address source, address destination) external {
+        LicenseRevenueToken(token).executeRecoveryMigration(recoveryId, source, destination);
+    }
+
+    function isExecutionAuthorized(bytes32 recoveryId, address token, address source, address destination)
+        external
+        view
+        returns (bool)
+    {
+        return _authorization[recoveryId] == keccak256(abi.encode(token, source, destination));
     }
 }
 

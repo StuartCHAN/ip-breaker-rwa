@@ -77,6 +77,7 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     error OnlyLegalHoldEscrow(address caller);
     error InvalidLegalHoldPosition(bytes32 subscriptionId, address position);
     error LegalHoldBalanceMismatch(address position, uint256 expected, uint256 actual);
+    error RecoveryOfActiveLegalHoldPositionForbidden(address position);
 
     event LifecycleChanged(Lifecycle indexed previousLifecycle, Lifecycle indexed newLifecycle);
     event RevenueVaultBound(address indexed vault);
@@ -268,6 +269,9 @@ contract LicenseRevenueToken is ERC20, AccessControl {
         if (!manager.isExecutionAuthorized(recoveryId, address(this), source, destination)) {
             revert RecoveryParametersNotAuthorized(recoveryId, source, destination);
         }
+        if (_isActiveLegalHoldPosition(source)) {
+            revert RecoveryOfActiveLegalHoldPositionForbidden(source);
+        }
 
         uint256 sourceBalance = balanceOf(source);
         if (sourceBalance == 0) revert ZeroRecoveryBalance(source);
@@ -281,6 +285,15 @@ contract LicenseRevenueToken is ERC20, AccessControl {
 
         assert(totalSupply() == supplyBefore);
         emit RecoveryMigrationExecuted(recoveryId, source, destination, sourceBalance, msg.sender);
+    }
+
+    function _isActiveLegalHoldPosition(address account) private view returns (bool) {
+        address distributionEscrow = primaryDistributionEscrow;
+        if (distributionEscrow == address(0) || distributionEscrow.code.length == 0) return false;
+
+        address holdEscrow = IPrimaryAllocationEscrow(distributionEscrow).legalHoldEscrow();
+        return holdEscrow != address(0) && holdEscrow.code.length != 0
+            && ILegalHoldEscrow(holdEscrow).isActivePosition(account);
     }
 
     /// @dev Single extension point for every token balance movement. The vault settles

@@ -36,6 +36,8 @@ interface ILegalHoldEscrow {
 
     function positionOf(bytes32 subscriptionId) external view returns (address);
 
+    function isActivePosition(address position) external view returns (bool);
+
     function isHeldPosition(bytes32 subscriptionId, address position, address beneficialOwner, uint256 amount)
         external
         view

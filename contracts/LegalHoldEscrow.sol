@@ -34,6 +34,7 @@ contract LegalHoldEscrow is ILegalHoldEscrow, ReentrancyGuard {
 
     mapping(bytes32 subscriptionId => LegalHoldPosition position) private _positions;
     mapping(address position => bool registered) public isRegisteredPosition;
+    mapping(address position => bool active) public isActivePosition;
 
     error ZeroOfferingManager();
     error ZeroOfferingId();
@@ -109,6 +110,7 @@ contract LegalHoldEscrow is ILegalHoldEscrow, ReentrancyGuard {
             status: PositionStatus.Held
         });
         isRegisteredPosition[position] = true;
+        isActivePosition[position] = true;
 
         emit LegalHoldPositionCreated(offeringId, subscriptionId, position, beneficialOwner, amount, sequence);
     }
@@ -124,6 +126,7 @@ contract LegalHoldEscrow is ILegalHoldEscrow, ReentrancyGuard {
                 subscriptionId, heldPosition.position, heldPosition.beneficialOwner, heldPosition.amount
             );
         heldPosition.status = PositionStatus.Released;
+        isActivePosition[heldPosition.position] = false;
 
         emit LegalHoldPositionReleased(
             offeringId, subscriptionId, heldPosition.position, heldPosition.beneficialOwner, heldPosition.amount
