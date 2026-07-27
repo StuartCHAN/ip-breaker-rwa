@@ -21,6 +21,8 @@ contract OfferingEscrowTest is Test {
     address private feeRecipient = makeAddr("fee-recipient");
     address private outsider = makeAddr("outsider");
 
+    event ProceedsEnabled(bytes32 indexed offeringId, uint256 issuerProceeds, uint256 protocolFee);
+
     function setUp() public {
         manager = new ContributionManagerMock();
         usdc = new SixDecimalSettlementMock();
@@ -145,6 +147,61 @@ contract OfferingEscrowTest is Test {
         vm.expectRevert(OfferingEscrow.RefundsAlreadyEnabled.selector);
         manager.enableRefunds(escrow);
     }
+
+    function testEnableProceedsFreezesConservedEntitlementsWithoutTransfer() public {
+        manager.record(escrow, SUBSCRIPTION_ID, payer, destination, 500_001, 500 ether, PAYMENT_REFERENCE, 0);
+
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit ProceedsEnabled(OFFERING_ID, 487_501, 12_500);
+        manager.enableProceeds(escrow);
+
+        assertTrue(escrow.proceedsEnabled());
+        assertEq(escrow.issuerProceeds(), 487_501);
+        assertEq(escrow.protocolFee(), 12_500);
+        assertEq(escrow.issuerProceeds() + escrow.protocolFee(), escrow.totalContributed());
+        assertEq(usdc.balanceOf(address(escrow)), 500_001);
+        assertEq(usdc.balanceOf(treasury), 0);
+        assertEq(usdc.balanceOf(feeRecipient), 0);
+    }
+
+    function testEnableProceedsOnlyManagerAndOnlyOnce() public {
+        manager.record(escrow, SUBSCRIPTION_ID, payer, destination, 500_000, 500 ether, PAYMENT_REFERENCE, 0);
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.UnauthorizedOfferingManager.selector, outsider));
+        escrow.enableProceeds();
+
+        manager.enableProceeds(escrow);
+        vm.expectRevert(OfferingEscrow.ProceedsAlreadyEnabled.selector);
+        manager.enableProceeds(escrow);
+    }
+
+    function testRefundAndProceedsPathsAreMutuallyExclusive() public {
+        manager.record(escrow, SUBSCRIPTION_ID, payer, destination, 500_000, 500 ether, PAYMENT_REFERENCE, 0);
+        manager.enableRefunds(escrow);
+
+        vm.expectRevert(OfferingEscrow.RefundPathActive.selector);
+        manager.enableProceeds(escrow);
+
+        OfferingEscrow secondEscrow =
+            new OfferingEscrow(address(manager), keccak256("second"), address(usdc), treasury, feeRecipient, 250);
+        manager.enableProceeds(secondEscrow);
+        vm.expectRevert(OfferingEscrow.ProceedsAlreadyEnabled.selector);
+        manager.enableRefunds(secondEscrow);
+    }
+
+    function testEnableProceedsInsolvencyRollsBackEntitlements() public {
+        manager.record(escrow, SUBSCRIPTION_ID, payer, destination, 500_000, 500 ether, PAYMENT_REFERENCE, 0);
+        vm.prank(address(escrow));
+        usdc.transfer(outsider, 1);
+
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.EscrowInsolvent.selector, 500_000, 499_999));
+        manager.enableProceeds(escrow);
+
+        assertFalse(escrow.proceedsEnabled());
+        assertEq(escrow.issuerProceeds(), 0);
+        assertEq(escrow.protocolFee(), 0);
+    }
 }
 
 contract ContributionManagerMock {
@@ -165,6 +222,10 @@ contract ContributionManagerMock {
 
     function enableRefunds(OfferingEscrow escrow) external {
         escrow.markRefundable();
+    }
+
+    function enableProceeds(OfferingEscrow escrow) external {
+        escrow.enableProceeds();
     }
 }
 

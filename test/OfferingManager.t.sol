@@ -9,6 +9,7 @@ import {AllocationEscrow} from "../contracts/AllocationEscrow.sol";
 import {OfferingEscrow} from "../contracts/OfferingEscrow.sol";
 import {OfferingManager, IIssuerEligibility} from "../contracts/OfferingManager.sol";
 import {RevenueProgramRegistry} from "../contracts/RevenueProgramRegistry.sol";
+import {RevenueVault} from "../contracts/RevenueVault.sol";
 import {LicenseRevenueToken} from "../contracts/LicenseRevenueToken.sol";
 import {IAllocationEscrow} from "../contracts/interfaces/IAllocationEscrow.sol";
 import {IIdentityRegistry} from "../contracts/interfaces/IIdentityRegistry.sol";
@@ -63,6 +64,7 @@ contract OfferingManagerTest is Test {
     );
     event OfferingOpened(bytes32 indexed offeringId, address indexed operator, uint64 openedAt);
     event DraftExpired(bytes32 indexed offeringId, address indexed caller, uint64 expiredAt);
+    event OfferingFinalized(bytes32 indexed offeringId, address indexed caller);
     event OfferingStatusChanged(
         bytes32 indexed offeringId,
         OfferingManager.OfferingStatus indexed previousStatus,
@@ -105,7 +107,7 @@ contract OfferingManagerTest is Test {
             address(investorEligibility),
             address(manager)
         );
-        revenueVault = new OfferingRevenueVaultMock(address(revenueToken));
+        revenueVault = new OfferingRevenueVaultMock(address(revenueToken), address(manager));
         bytes32 expectedOfferingId = keccak256(
             abi.encode(
                 block.chainid,
@@ -363,7 +365,8 @@ contract OfferingManagerTest is Test {
             address(investorEligibility),
             address(manager)
         );
-        OfferingRevenueVaultMock replacementVault = new OfferingRevenueVaultMock(address(replacementToken));
+        OfferingRevenueVaultMock replacementVault =
+            new OfferingRevenueVaultMock(address(replacementToken), address(manager));
         AllocationEscrow replacementAllocationEscrow =
             new AllocationEscrow(address(manager), replacementOfferingId, address(replacementToken), FINAL_SUPPLY);
         OfferingEscrow replacementOfferingEscrow = new OfferingEscrow(
@@ -562,7 +565,8 @@ contract OfferingManagerTest is Test {
             address(investorEligibility),
             outsider
         );
-        OfferingRevenueVaultMock foreignVault = new OfferingRevenueVaultMock(address(foreignControlledToken));
+        OfferingRevenueVaultMock foreignVault =
+            new OfferingRevenueVaultMock(address(foreignControlledToken), address(manager));
         OfferingManager.OfferingConfig memory config = _validConfig();
         config.revenueToken = address(foreignControlledToken);
         config.revenueVault = address(foreignVault);
@@ -1184,6 +1188,209 @@ contract OfferingManagerTest is Test {
         revenueToken.transfer(secondDestination, 1 ether);
     }
 
+    function testPermissionlessAtomicFinalizationActivatesAllDependenciesWithoutMovingUSDC() public {
+        bytes32 offeringId = _prepareFinalizableOffering();
+        uint256 escrowUSDCBefore = usdc.balanceOf(address(offeringEscrow));
+        uint256 treasuryBefore = usdc.balanceOf(issuerTreasury);
+        uint256 feeRecipientBefore = usdc.balanceOf(feeRecipient);
+
+        vm.expectEmit(true, true, false, true, address(manager));
+        emit OfferingFinalized(offeringId, outsider);
+        vm.expectEmit(true, true, true, true, address(manager));
+        emit OfferingStatusChanged(
+            offeringId, OfferingManager.OfferingStatus.Successful, OfferingManager.OfferingStatus.Finalized
+        );
+        vm.prank(outsider);
+        manager.finalizeOffering(offeringId);
+
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Finalized));
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Activated));
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Active)
+        );
+        assertEq(programRegistry.activeOfferingByAsset(ASSET_ID), offeringId);
+        assertEq(uint256(revenueVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Enabled));
+        assertTrue(offeringEscrow.proceedsEnabled());
+
+        uint256 expectedFee = offeringEscrow.totalContributed() * 250 / 10_000;
+        assertEq(offeringEscrow.protocolFee(), expectedFee);
+        assertEq(offeringEscrow.issuerProceeds(), offeringEscrow.totalContributed() - expectedFee);
+        assertEq(offeringEscrow.issuerProceeds() + offeringEscrow.protocolFee(), offeringEscrow.totalContributed());
+        assertEq(allocationEscrow.totalDelivered(), FINAL_SUPPLY);
+        assertEq(allocationEscrow.totalReleased() + allocationEscrow.legalHoldTransferred(), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), 0);
+        assertEq(revenueToken.balanceOf(address(manager)), 0);
+        assertEq(usdc.balanceOf(address(manager)), 0);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), escrowUSDCBefore);
+        assertEq(usdc.balanceOf(issuerTreasury), treasuryBefore);
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBefore);
+    }
+
+    function testAtomicFinalizationEnablesProductionRevenueVault() public {
+        RevenueVault productionVault =
+            new RevenueVault(address(revenueToken), address(usdc), admin, outsider, address(manager));
+        OfferingManager.OfferingConfig memory config = _validConfig();
+        config.revenueVault = address(productionVault);
+
+        vm.prank(assetOwner);
+        bytes32 offeringId = manager.createOffering(config);
+        vm.warp(config.opensAt);
+        vm.prank(operator);
+        manager.openOffering(offeringId);
+        _prepareInvestor(investor, destination);
+        vm.prank(investor);
+        manager.subscribe(offeringId, FINAL_SUPPLY, FINAL_SUPPLY, destination, keccak256("production-vault"));
+        vm.warp(config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        manager.deliverAllocation(offeringId, 0);
+        manager.finalizeOffering(offeringId);
+
+        assertEq(uint256(productionVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Enabled));
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Finalized));
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Activated));
+        assertTrue(offeringEscrow.proceedsEnabled());
+    }
+
+    function testFinalizationRequiresCompleteDeliveryAndCannotReplay() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(OfferingManager.FinalizationDeliveryIncomplete.selector, uint64(0), uint64(1))
+        );
+        manager.finalizeOffering(offeringId);
+
+        manager.deliverAllocation(offeringId, 0);
+        manager.finalizeOffering(offeringId);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.InvalidOfferingStatus.selector,
+                offeringId,
+                OfferingManager.OfferingStatus.Finalized,
+                OfferingManager.OfferingStatus.Successful
+            )
+        );
+        manager.finalizeOffering(offeringId);
+    }
+
+    function testOfferingFailedCannotFinalize() public {
+        bytes32 offeringId = _openOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.resolveOfferingOutcome(offeringId);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.InvalidOfferingStatus.selector,
+                offeringId,
+                OfferingManager.OfferingStatus.Failed,
+                OfferingManager.OfferingStatus.Successful
+            )
+        );
+        manager.finalizeOffering(offeringId);
+    }
+
+    function testDraftExpiredOfferingCannotFinalize() public {
+        bytes32 offeringId = _createOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.expireDraft(offeringId);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.InvalidOfferingStatus.selector,
+                offeringId,
+                OfferingManager.OfferingStatus.Failed,
+                OfferingManager.OfferingStatus.Successful
+            )
+        );
+        manager.finalizeOffering(offeringId);
+    }
+
+    function testTokenActivationFailureRollsBackFinalization() public {
+        bytes32 offeringId = _prepareFinalizableOffering();
+        bytes32 controllerRole = revenueToken.TOKEN_CONTROLLER_ROLE();
+        vm.prank(address(manager));
+        revenueToken.revokeRole(controllerRole, address(manager));
+
+        vm.expectRevert();
+        manager.finalizeOffering(offeringId);
+
+        _assertFinalizationRolledBack(offeringId);
+    }
+
+    function testProgramActivationFailureRollsBackFinalization() public {
+        bytes32 offeringId = _prepareFinalizableOffering();
+        bytes32 programManagerRole = programRegistry.PROGRAM_MANAGER_ROLE();
+        vm.prank(admin);
+        programRegistry.revokeRole(programManagerRole, address(manager));
+
+        vm.expectRevert();
+        manager.finalizeOffering(offeringId);
+
+        _assertFinalizationRolledBack(offeringId);
+    }
+
+    function testVaultEnableFailureRollsBackFinalization() public {
+        bytes32 offeringId = _prepareFinalizableOffering();
+        revenueVault.setEnableFailure(true);
+
+        vm.expectRevert(OfferingRevenueVaultMock.EnableFailed.selector);
+        manager.finalizeOffering(offeringId);
+
+        _assertFinalizationRolledBack(offeringId);
+    }
+
+    function testOfferingEscrowEnableFailureRollsBackFinalization() public {
+        bytes32 offeringId = _prepareFinalizableOffering();
+        vm.mockCallRevert(
+            address(offeringEscrow),
+            abi.encodeWithSelector(OfferingEscrow.enableProceeds.selector),
+            abi.encodeWithSelector(OfferingEscrow.ProceedsAlreadyEnabled.selector)
+        );
+
+        vm.expectRevert(OfferingEscrow.ProceedsAlreadyEnabled.selector);
+        manager.finalizeOffering(offeringId);
+
+        _assertFinalizationRolledBack(offeringId);
+    }
+
+    function testFinalCrossCheckFailureRollsBackEveryActivation() public {
+        bytes32 offeringId = _prepareFinalizableOffering();
+        revenueVault.setMisreportLifecycle(true);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.VaultDepositLifecycleMismatch.selector,
+                IRevenueVault.DepositLifecycle.Enabled,
+                IRevenueVault.DepositLifecycle.Disabled
+            )
+        );
+        manager.finalizeOffering(offeringId);
+
+        revenueVault.setMisreportLifecycle(false);
+        _assertFinalizationRolledBack(offeringId);
+    }
+
+    function testFinalizationCustodyCrossChecksRejectInconsistentDependencies() public {
+        bytes32 offeringId = _prepareFinalizableOffering();
+        vm.mockCall(
+            address(allocationEscrow),
+            abi.encodeWithSelector(IAllocationEscrow.totalDelivered.selector),
+            abi.encode(FINAL_SUPPLY - 1)
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.FinalizationDeliveredSupplyMismatch.selector, FINAL_SUPPLY, FINAL_SUPPLY - 1
+            )
+        );
+        manager.finalizeOffering(offeringId);
+
+        vm.clearMockedCalls();
+        _assertFinalizationRolledBack(offeringId);
+    }
+
     function testDeliveryRejectedBeforeSuccessfulAndAfterFailed() public {
         bytes32 openOfferingId = _subscribeFullOffering();
 
@@ -1271,6 +1478,16 @@ contract OfferingManagerTest is Test {
         assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
         assertEq(offeringEscrow.totalContributed(), contributedBefore);
         assertEq(usdc.balanceOf(address(manager)), 0);
+
+        manager.finalizeOffering(offeringId);
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Finalized));
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Activated));
+        assertEq(revenueToken.balanceOf(position), 6_000 ether);
+
+        investorEligibility.setEligible(secondDestination, ASSET_ID, true);
+        manager.releaseLegalHold(offeringId, 1);
+        assertEq(revenueToken.balanceOf(position), 0);
+        assertEq(revenueToken.balanceOf(secondDestination), 6_000 ether);
     }
 
     function testIneligibleDestinationEntersRemediationWithoutAddressReplacement() public {
@@ -1557,6 +1774,32 @@ contract OfferingManagerTest is Test {
         manager.subscribe(offeringId, FINAL_SUPPLY, FINAL_SUPPLY, destination, keccak256("full"));
     }
 
+    function _prepareFinalizableOffering() private returns (bytes32 offeringId) {
+        offeringId = _subscribeFullOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        manager.deliverAllocation(offeringId, 0);
+    }
+
+    function _assertFinalizationRolledBack(bytes32 offeringId) private view {
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Successful));
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Reserved)
+        );
+        assertEq(programRegistry.liveOfferingByAsset(ASSET_ID), offeringId);
+        assertEq(uint256(revenueVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Disabled));
+        assertFalse(offeringEscrow.proceedsEnabled());
+        assertEq(offeringEscrow.issuerProceeds(), 0);
+        assertEq(offeringEscrow.protocolFee(), 0);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), offeringEscrow.totalContributed());
+        assertEq(allocationEscrow.totalDelivered(), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), 0);
+        assertEq(revenueToken.balanceOf(address(manager)), 0);
+        assertEq(usdc.balanceOf(address(manager)), 0);
+    }
+
     function _assertOpenRolledBack(bytes32 offeringId) private view {
         assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Draft));
         assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Created));
@@ -1697,19 +1940,42 @@ contract OfferingInvestorEligibilityMock is IInvestorEligibility {
 contract OfferingRevenueVaultMock is IRevenueVault {
     IERC20 public immutable revenueToken;
     address public immutable activationController;
-    DepositLifecycle public depositLifecycle;
+    DepositLifecycle private _depositLifecycle;
     bool private _checkpointFailure;
+    bool private _enableFailure;
+    bool private _misreportLifecycle;
 
     error UnauthorizedToken();
+    error UnauthorizedActivationController();
     error CheckpointFailed();
+    error EnableFailed();
+    error TokenNotActivated();
 
-    constructor(address revenueToken_) {
+    constructor(address revenueToken_, address activationController_) {
         revenueToken = IERC20(revenueToken_);
-        activationController = msg.sender;
+        activationController = activationController_;
     }
 
     function enableDeposits() external {
-        depositLifecycle = DepositLifecycle.Enabled;
+        if (_enableFailure) revert EnableFailed();
+        if (msg.sender != activationController) revert UnauthorizedActivationController();
+        if (LicenseRevenueToken(address(revenueToken)).lifecycle() != LicenseRevenueToken.Lifecycle.Activated) {
+            revert TokenNotActivated();
+        }
+        _depositLifecycle = DepositLifecycle.Enabled;
+    }
+
+    function depositLifecycle() external view returns (DepositLifecycle) {
+        if (_misreportLifecycle) return DepositLifecycle.Disabled;
+        return _depositLifecycle;
+    }
+
+    function setEnableFailure(bool shouldFail) external {
+        _enableFailure = shouldFail;
+    }
+
+    function setMisreportLifecycle(bool shouldMisreport) external {
+        _misreportLifecycle = shouldMisreport;
     }
 
     function setCheckpointFailure(bool shouldFail) external {

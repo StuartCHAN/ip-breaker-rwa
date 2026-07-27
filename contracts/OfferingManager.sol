@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -14,6 +15,7 @@ import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 import {ILegalHoldEscrow} from "./interfaces/ILegalHoldEscrow.sol";
 import {IOfferingEscrow} from "./interfaces/IOfferingEscrow.sol";
 import {IRevenueProgramRegistry} from "./interfaces/IRevenueProgramRegistry.sol";
+import {IRevenueVault} from "./interfaces/IRevenueVault.sol";
 
 /// @notice Issuer/SPV verification boundary; deliberately separate from investor and asset-owner roles.
 interface IIssuerEligibility {
@@ -210,6 +212,17 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     error RevenueProgramStateMismatch(
         bytes32 offeringId, IRevenueProgramRegistry.ProgramStatus expected, IRevenueProgramRegistry.ProgramStatus actual
     );
+    error FinalizationDeliveryIncomplete(uint64 deliveredCount, uint64 subscriptionCount);
+    error FinalizationDeliveredSupplyMismatch(uint256 expected, uint256 actual);
+    error FinalizationDeliveryAccountingMismatch(uint256 expected, uint256 direct, uint256 legalHold);
+    error FinalizationAllocationBalanceNotZero(uint256 balance);
+    error FinalizationContributionMismatch(uint256 expected, uint256 actual);
+    error VaultActivationControllerMismatch(address expected, address actual);
+    error VaultDepositLifecycleMismatch(IRevenueVault.DepositLifecycle expected, IRevenueVault.DepositLifecycle actual);
+    error FinalizationTokenLifecycleMismatch(LicenseRevenueToken.Lifecycle actual);
+    error FinalizationProgramMismatch(bytes32 offeringId);
+    error FinalizationProceedsMismatch(uint256 contributed, uint256 issuerAmount, uint256 feeAmount);
+    error FinalizationManagerAssetBalanceNotZero(address asset, uint256 balance);
 
     event OfferingCreated(
         bytes32 indexed offeringId,
@@ -250,6 +263,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     event SubscriptionRemediationFlagged(bytes32 indexed offeringId, bytes32 indexed subscriptionId, uint8 reason);
     event OfferingSuccessful(bytes32 indexed offeringId, uint256 validSoldSupply, uint256 validCommittedUSDC);
     event OfferingFailed(bytes32 indexed offeringId, uint256 validSoldSupply, uint256 validCommittedUSDC);
+    event OfferingFinalized(bytes32 indexed offeringId, address indexed caller);
     event AllocationDelivered(
         bytes32 indexed offeringId,
         bytes32 indexed subscriptionId,
@@ -609,6 +623,59 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         );
     }
 
+    /// @notice Atomically activates every successful-offering economic dependency after complete delivery.
+    function finalizeOffering(bytes32 offeringId) external nonReentrant {
+        Offering storage offering = _getOffering(offeringId);
+        _requireStatus(offeringId, offering.status, OfferingStatus.Successful);
+
+        OfferingConfig storage config = offering.config;
+        if (offering.deliveredCount != offering.nextSequence) {
+            revert FinalizationDeliveryIncomplete(offering.deliveredCount, offering.nextSequence);
+        }
+
+        IAllocationEscrow allocationEscrow = IAllocationEscrow(config.allocationEscrow);
+        uint256 totalDelivered = allocationEscrow.totalDelivered();
+        if (totalDelivered != config.finalSupply) {
+            revert FinalizationDeliveredSupplyMismatch(config.finalSupply, totalDelivered);
+        }
+        uint256 directReleased = allocationEscrow.totalReleased();
+        uint256 legalHoldDelivered = allocationEscrow.legalHoldTransferred();
+        if (directReleased + legalHoldDelivered != config.finalSupply) {
+            revert FinalizationDeliveryAccountingMismatch(config.finalSupply, directReleased, legalHoldDelivered);
+        }
+
+        LicenseRevenueToken revenueToken = LicenseRevenueToken(config.revenueToken);
+        uint256 allocationBalance = revenueToken.balanceOf(config.allocationEscrow);
+        if (allocationBalance != 0) revert FinalizationAllocationBalanceNotZero(allocationBalance);
+
+        IOfferingEscrow offeringEscrow = IOfferingEscrow(config.offeringEscrow);
+        uint256 contributed = offeringEscrow.totalContributed();
+        if (contributed != offering.validCommittedUSDC) {
+            revert FinalizationContributionMismatch(offering.validCommittedUSDC, contributed);
+        }
+
+        IRevenueVault revenueVault = IRevenueVault(config.revenueVault);
+        address vaultController = revenueVault.activationController();
+        if (vaultController != address(this)) {
+            revert VaultActivationControllerMismatch(address(this), vaultController);
+        }
+        IRevenueVault.DepositLifecycle vaultLifecycle = revenueVault.depositLifecycle();
+        if (vaultLifecycle != IRevenueVault.DepositLifecycle.Disabled) {
+            revert VaultDepositLifecycleMismatch(IRevenueVault.DepositLifecycle.Disabled, vaultLifecycle);
+        }
+
+        revenueToken.activate();
+        revenueProgramRegistry.activateProgram(offeringId);
+        revenueVault.enableDeposits();
+        offeringEscrow.enableProceeds();
+
+        _validateFinalizationPostconditions(offeringId, offering, revenueToken, revenueVault, offeringEscrow);
+
+        offering.status = OfferingStatus.Finalized;
+        emit OfferingFinalized(offeringId, msg.sender);
+        emit OfferingStatusChanged(offeringId, OfferingStatus.Successful, OfferingStatus.Finalized);
+    }
+
     /// @notice Releases one isolated remediation position only to its original, currently eligible beneficiary.
     function releaseLegalHold(bytes32 offeringId, uint64 sequence) external nonReentrant {
         Offering storage offering = _getOffering(offeringId);
@@ -841,6 +908,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         if (boundVault != address(0) && boundVault != config.revenueVault) {
             revert TokenVaultMismatch(config.revenueVault, boundVault);
         }
+        _validateRevenueVaultBundle(config.revenueVault);
 
         address boundRecoveryManager = address(revenueToken.recoveryManager());
         if (boundRecoveryManager != address(0) && boundRecoveryManager != config.recoveryManager) {
@@ -853,6 +921,18 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
 
         _validateAllocationEscrowBundle(offeringId, config);
         _validateOfferingEscrowBundle(offeringId, config);
+    }
+
+    function _validateRevenueVaultBundle(address revenueVault) private view {
+        IRevenueVault configuredVault = IRevenueVault(revenueVault);
+        address vaultController = configuredVault.activationController();
+        if (vaultController != address(this)) {
+            revert VaultActivationControllerMismatch(address(this), vaultController);
+        }
+        IRevenueVault.DepositLifecycle vaultLifecycle = configuredVault.depositLifecycle();
+        if (vaultLifecycle != IRevenueVault.DepositLifecycle.Disabled) {
+            revert VaultDepositLifecycleMismatch(IRevenueVault.DepositLifecycle.Disabled, vaultLifecycle);
+        }
     }
 
     function _validateAllocationEscrowBundle(bytes32 offeringId, OfferingConfig storage config) private view {
@@ -940,6 +1020,55 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         }
         if (revenueProgramRegistry.liveOfferingByAsset(assetId) != bytes32(0)) {
             revert RevenueProgramBindingMismatch(offeringId);
+        }
+    }
+
+    function _validateFinalizationPostconditions(
+        bytes32 offeringId,
+        Offering storage offering,
+        LicenseRevenueToken revenueToken,
+        IRevenueVault revenueVault,
+        IOfferingEscrow offeringEscrow
+    ) private view {
+        OfferingConfig storage config = offering.config;
+        if (revenueToken.lifecycle() != LicenseRevenueToken.Lifecycle.Activated) {
+            revert FinalizationTokenLifecycleMismatch(revenueToken.lifecycle());
+        }
+
+        IRevenueProgramRegistry.RevenueProgram memory program = revenueProgramRegistry.getProgram(offeringId);
+        if (
+            program.status != IRevenueProgramRegistry.ProgramStatus.Active
+                || revenueProgramRegistry.activeOfferingByAsset(config.assetId) != offeringId
+                || program.assetId != config.assetId || program.issuer != config.issuer
+                || program.revenueToken != config.revenueToken || program.revenueVault != config.revenueVault
+                || program.settlementToken != config.settlementToken
+        ) {
+            revert FinalizationProgramMismatch(offeringId);
+        }
+
+        if (revenueVault.depositLifecycle() != IRevenueVault.DepositLifecycle.Enabled) {
+            revert VaultDepositLifecycleMismatch(
+                IRevenueVault.DepositLifecycle.Enabled, revenueVault.depositLifecycle()
+            );
+        }
+
+        uint256 contributed = offeringEscrow.totalContributed();
+        uint256 issuerAmount = offeringEscrow.issuerProceeds();
+        uint256 feeAmount = offeringEscrow.protocolFee();
+        if (
+            !offeringEscrow.proceedsEnabled() || offeringEscrow.refundable() || offeringEscrow.totalRefunded() != 0
+                || issuerAmount + feeAmount != contributed
+        ) {
+            revert FinalizationProceedsMismatch(contributed, issuerAmount, feeAmount);
+        }
+
+        uint256 tokenBalance = revenueToken.balanceOf(address(this));
+        if (tokenBalance != 0) {
+            revert FinalizationManagerAssetBalanceNotZero(config.revenueToken, tokenBalance);
+        }
+        uint256 settlementBalance = IERC20(config.settlementToken).balanceOf(address(this));
+        if (settlementBalance != 0) {
+            revert FinalizationManagerAssetBalanceNotZero(config.settlementToken, settlementBalance);
         }
     }
 

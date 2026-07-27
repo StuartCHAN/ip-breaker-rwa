@@ -20,7 +20,15 @@ interface IOfferingEscrow {
 
     function refundable() external view returns (bool);
 
+    function proceedsEnabled() external view returns (bool);
+
+    function issuerProceeds() external view returns (uint256);
+
+    function protocolFee() external view returns (uint256);
+
     function markRefundable() external;
+
+    function enableProceeds() external;
 
     function claimRefund(bytes32 subscriptionId) external;
 

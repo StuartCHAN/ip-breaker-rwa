@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IOfferingEscrow} from "./interfaces/IOfferingEscrow.sol";
 
@@ -39,6 +40,9 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
     uint256 public totalContributed;
     uint256 public totalRefunded;
     bool public refundable;
+    bool public proceedsEnabled;
+    uint256 public issuerProceeds;
+    uint256 public protocolFee;
     mapping(bytes32 subscriptionId => Contribution contribution) private _contributions;
     mapping(bytes32 paymentReference => bool used) public paymentReferenceUsed;
 
@@ -60,6 +64,9 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
     error PaymentReferenceAlreadyUsed(bytes32 paymentReference);
     error IncorrectSettlementDelta(uint256 expected, uint256 actual);
     error RefundsAlreadyEnabled();
+    error ProceedsAlreadyEnabled();
+    error RefundPathActive();
+    error ProceedsConservationViolation(uint256 issuerAmount, uint256 feeAmount, uint256 contributed);
     error RefundsNotEnabled();
     error UnknownContribution(bytes32 subscriptionId);
     error UnauthorizedRefundClaimant(address caller, address payer);
@@ -78,6 +85,7 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
         bytes32 contributionHash
     );
     event RefundsEnabled(bytes32 indexed offeringId);
+    event ProceedsEnabled(bytes32 indexed offeringId, uint256 issuerProceeds, uint256 protocolFee);
     event RefundClaimed(
         bytes32 indexed offeringId, bytes32 indexed subscriptionId, address indexed payer, uint256 amount
     );
@@ -128,6 +136,7 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
         uint64 sequence
     ) external onlyOfferingManager nonReentrant {
         if (refundable) revert RefundsAlreadyEnabled();
+        if (proceedsEnabled) revert ProceedsAlreadyEnabled();
         if (subscriptionId == bytes32(0)) revert ZeroSubscriptionId();
         if (payer == address(0)) revert ZeroPayer();
         if (destination == address(0)) revert ZeroDestination();
@@ -194,8 +203,30 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
 
     function markRefundable() external onlyOfferingManager {
         if (refundable) revert RefundsAlreadyEnabled();
+        if (proceedsEnabled) revert ProceedsAlreadyEnabled();
         refundable = true;
         emit RefundsEnabled(offeringId);
+    }
+
+    /// @notice Freezes successful-offering proceeds entitlements without transferring settlement funds.
+    function enableProceeds() external onlyOfferingManager {
+        if (proceedsEnabled) revert ProceedsAlreadyEnabled();
+        if (refundable || totalRefunded != 0) revert RefundPathActive();
+
+        uint256 feeAmount = Math.mulDiv(totalContributed, protocolFeeBps, MAX_BPS);
+        uint256 issuerAmount = totalContributed - feeAmount;
+        if (issuerAmount + feeAmount != totalContributed) {
+            revert ProceedsConservationViolation(issuerAmount, feeAmount, totalContributed);
+        }
+
+        uint256 available = IERC20(settlementToken).balanceOf(address(this));
+        if (available < totalContributed) revert EscrowInsolvent(totalContributed, available);
+
+        issuerProceeds = issuerAmount;
+        protocolFee = feeAmount;
+        proceedsEnabled = true;
+
+        emit ProceedsEnabled(offeringId, issuerAmount, feeAmount);
     }
 
     function claimRefund(bytes32 subscriptionId) external nonReentrant {
