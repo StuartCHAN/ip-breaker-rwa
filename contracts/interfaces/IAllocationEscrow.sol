@@ -12,6 +12,8 @@ interface IAllocationEscrow {
 
     function finalSupply() external view returns (uint256);
 
+    function legalHoldEscrow() external view returns (address);
+
     function depositConfirmed() external view returns (bool);
 
     function confirmTokenDeposit() external;
@@ -25,6 +27,12 @@ interface IAllocationEscrow {
     function tombstone() external;
 
     function releaseAllocation(bytes32 subscriptionId) external;
+
+    function holdAllocation(bytes32 subscriptionId) external returns (address position);
+
+    function legalHoldTransferred() external view returns (uint256);
+
+    function totalDelivered() external view returns (uint256);
 
     function registerAllocation(
         bytes32 subscriptionId,

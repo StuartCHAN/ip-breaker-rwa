@@ -30,4 +30,9 @@ contract MockRevenueVault is IRevenueVault {
         if (checkpointShouldRevert) revert CheckpointFailed();
         ++checkpointCount;
     }
+
+    function checkpointLegalHoldRelease(address, address, uint256) external {
+        if (checkpointShouldRevert) revert CheckpointFailed();
+        ++checkpointCount;
+    }
 }

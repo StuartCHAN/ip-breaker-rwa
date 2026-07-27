@@ -8,6 +8,11 @@ import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 import {IInvestorEligibility} from "./interfaces/IInvestorEligibility.sol";
 import {IRecoveryManager} from "./interfaces/IRecoveryManager.sol";
 import {IRevenueVault} from "./interfaces/IRevenueVault.sol";
+import {ILegalHoldEscrow} from "./interfaces/ILegalHoldEscrow.sol";
+
+interface IPrimaryAllocationEscrow {
+    function legalHoldEscrow() external view returns (address);
+}
 
 /// @title LicenseRevenueToken
 /// @notice Compliance-restricted revenue participation units for one registered IP asset.
@@ -37,6 +42,8 @@ contract LicenseRevenueToken is ERC20, AccessControl {
 
     bool private _recoveryInProgress;
     bool private _primaryDeliveryInProgress;
+    bool private _primaryLegalHoldDeliveryInProgress;
+    bool private _legalHoldReleaseInProgress;
     bool private _checkpointInProgress;
 
     error ZeroIPAssetRegistry();
@@ -67,12 +74,19 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     error ZeroPrimaryDistributionEscrow();
     error PrimaryDistributionEscrowAlreadyBound(address escrow);
     error OnlyPrimaryDistributionEscrow(address caller);
+    error OnlyLegalHoldEscrow(address caller);
+    error InvalidLegalHoldPosition(bytes32 subscriptionId, address position);
+    error LegalHoldBalanceMismatch(address position, uint256 expected, uint256 actual);
 
     event LifecycleChanged(Lifecycle indexed previousLifecycle, Lifecycle indexed newLifecycle);
     event RevenueVaultBound(address indexed vault);
     event RecoveryManagerBound(address indexed manager);
     event PrimaryDistributionEscrowBound(address indexed escrow);
     event PrimaryAllocationDelivered(address indexed escrow, address indexed destination, uint256 amount);
+    event PrimaryAllocationHeld(bytes32 indexed subscriptionId, address indexed position, uint256 amount);
+    event LegalHoldAllocationReleased(
+        bytes32 indexed subscriptionId, address indexed position, address indexed beneficialOwner, uint256 amount
+    );
     event RecoveryMigrationExecuted(
         bytes32 indexed recoveryId,
         address indexed source,
@@ -191,6 +205,55 @@ contract LicenseRevenueToken is ERC20, AccessControl {
         emit PrimaryAllocationDelivered(msg.sender, destination, amount);
     }
 
+    /// @notice Moves a frozen primary allocation to its registered isolated legal-hold position.
+    function executePrimaryLegalHoldDelivery(bytes32 subscriptionId, address position, uint256 amount) external {
+        address distributionEscrow = primaryDistributionEscrow;
+        if (msg.sender != distributionEscrow) revert OnlyPrimaryDistributionEscrow(msg.sender);
+        if (lifecycle != Lifecycle.Minting) revert InvalidLifecycle(lifecycle, Lifecycle.Minting);
+
+        address holdEscrow = IPrimaryAllocationEscrow(distributionEscrow).legalHoldEscrow();
+        ILegalHoldEscrow.LegalHoldPosition memory heldPosition =
+            ILegalHoldEscrow(holdEscrow).getPosition(subscriptionId);
+        if (
+            heldPosition.status != ILegalHoldEscrow.PositionStatus.Held || heldPosition.position != position
+                || heldPosition.amount != amount
+        ) {
+            revert InvalidLegalHoldPosition(subscriptionId, position);
+        }
+
+        _primaryLegalHoldDeliveryInProgress = true;
+        _update(msg.sender, position, amount);
+        _primaryLegalHoldDeliveryInProgress = false;
+
+        emit PrimaryAllocationHeld(subscriptionId, position, amount);
+    }
+
+    /// @notice Releases one complete isolated legal-hold position with its historical reward state.
+    function executeLegalHoldRelease(bytes32 subscriptionId, address source, address destination, uint256 amount)
+        external
+    {
+        address distributionEscrow = primaryDistributionEscrow;
+        address holdEscrow = IPrimaryAllocationEscrow(distributionEscrow).legalHoldEscrow();
+        if (msg.sender != holdEscrow) revert OnlyLegalHoldEscrow(msg.sender);
+        if (lifecycle != Lifecycle.Minting && lifecycle != Lifecycle.Activated) {
+            revert InvalidLifecycle(lifecycle, Lifecycle.Minting);
+        }
+        if (!_canHold(destination)) revert IneligibleInvestor(destination);
+        if (!ILegalHoldEscrow(holdEscrow).isHeldPosition(subscriptionId, source, destination, amount)) {
+            revert InvalidLegalHoldPosition(subscriptionId, source);
+        }
+        uint256 sourceBalance = balanceOf(source);
+        if (sourceBalance != amount) {
+            revert LegalHoldBalanceMismatch(source, amount, sourceBalance);
+        }
+
+        _legalHoldReleaseInProgress = true;
+        _update(source, destination, amount);
+        _legalHoldReleaseInProgress = false;
+
+        emit LegalHoldAllocationReleased(subscriptionId, source, destination, amount);
+    }
+
     /// @notice Migrates one source account's complete balance under an authorized recovery request.
     /// @dev The Vault reward-state migration executes before the ERC-20 balance update in the same transaction.
     function executeRecoveryMigration(bytes32 recoveryId, address source, address destination) external {
@@ -232,6 +295,11 @@ contract LicenseRevenueToken is ERC20, AccessControl {
             if (from != primaryDistributionEscrow) revert OnlyPrimaryDistributionEscrow(from);
             if (lifecycle != Lifecycle.Minting) revert InvalidLifecycle(lifecycle, Lifecycle.Minting);
             if (!_canHold(to)) revert IneligibleInvestor(to);
+        } else if (_primaryLegalHoldDeliveryInProgress) {
+            if (from != primaryDistributionEscrow) revert OnlyPrimaryDistributionEscrow(from);
+            if (lifecycle != Lifecycle.Minting) revert InvalidLifecycle(lifecycle, Lifecycle.Minting);
+        } else if (_legalHoldReleaseInProgress) {
+            if (!_canHold(to)) revert IneligibleInvestor(to);
         } else if (!_recoveryInProgress) {
             if (lifecycle != Lifecycle.Activated) revert TransfersNotActive();
             if (!_canHold(from)) revert IneligibleInvestor(from);
@@ -245,6 +313,8 @@ contract LicenseRevenueToken is ERC20, AccessControl {
         _checkpointInProgress = true;
         if (_recoveryInProgress) {
             vault.checkpointRecovery(from, to, value);
+        } else if (_legalHoldReleaseInProgress) {
+            vault.checkpointLegalHoldRelease(from, to, value);
         } else {
             vault.checkpointTransfer(from, to, value);
         }

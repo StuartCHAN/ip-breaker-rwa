@@ -54,6 +54,9 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
     event RevenueStateMigrated(
         address indexed source, address indexed destination, uint256 tokenAmount, uint256 pendingRewardAmount
     );
+    event LegalHoldRevenueStateMigrated(
+        address indexed source, address indexed destination, uint256 tokenAmount, uint256 pendingRewardAmount
+    );
 
     constructor(address revenueToken_, address settlementToken_, address admin_, address depositor_) {
         if (revenueToken_ == address(0)) revert ZeroRevenueToken();
@@ -126,6 +129,21 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
     /// @inheritdoc IRevenueVault
     function checkpointRecovery(address source, address destination, uint256 amount) external nonReentrant {
         if (msg.sender != address(revenueToken)) revert OnlyRevenueToken(msg.sender);
+        uint256 migratedPending = _migrateCompleteRevenueState(source, destination, amount);
+        emit RevenueStateMigrated(source, destination, amount, migratedPending);
+    }
+
+    /// @inheritdoc IRevenueVault
+    function checkpointLegalHoldRelease(address source, address destination, uint256 amount) external nonReentrant {
+        if (msg.sender != address(revenueToken)) revert OnlyRevenueToken(msg.sender);
+        uint256 migratedPending = _migrateCompleteRevenueState(source, destination, amount);
+        emit LegalHoldRevenueStateMigrated(source, destination, amount, migratedPending);
+    }
+
+    function _migrateCompleteRevenueState(address source, address destination, uint256 amount)
+        private
+        returns (uint256 migratedPending)
+    {
         if (source == address(0) || destination == address(0) || source == destination) {
             revert InvalidRecoveryAccounts(source, destination);
         }
@@ -142,7 +160,7 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
         _accrueWithBalance(source, sourceBalance);
         _accrueWithBalance(destination, destinationBalance);
 
-        uint256 migratedPending = pendingReward[source];
+        migratedPending = pendingReward[source];
         pendingReward[source] = 0;
         pendingReward[destination] += migratedPending;
 
@@ -155,8 +173,6 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
         assert(pendingReward[source] == 0);
         assert(rewardDebt[source] == 0);
         _requireSolvent();
-
-        emit RevenueStateMigrated(source, destination, amount, migratedPending);
     }
 
     /// @notice Pulls all revenue currently accrued to the caller.

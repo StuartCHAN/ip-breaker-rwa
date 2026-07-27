@@ -5,6 +5,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IAllocationEscrow} from "./interfaces/IAllocationEscrow.sol";
+import {ILegalHoldEscrow} from "./interfaces/ILegalHoldEscrow.sol";
+import {LegalHoldEscrow} from "./LegalHoldEscrow.sol";
 
 interface IOfferingManagerStatus {
     function getOfferingStatus(bytes32 offeringId) external view returns (uint8);
@@ -16,6 +18,8 @@ interface IRevenueTokenSupply is IERC20 {
     function totalSupply() external view returns (uint256);
 
     function executePrimaryDelivery(address destination, uint256 amount) external;
+
+    function executePrimaryLegalHoldDelivery(bytes32 subscriptionId, address position, uint256 amount) external;
 }
 
 /// @title AllocationEscrow
@@ -29,6 +33,7 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         uint64 sequence;
         bool exists;
         bool released;
+        bool legalHeld;
     }
 
     uint8 private constant STATUS_DRAFT = 1;
@@ -39,11 +44,13 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
     bytes32 public immutable offeringId;
     address public immutable revenueToken;
     uint256 public immutable finalSupply;
+    address public immutable legalHoldEscrow;
 
     bool public depositConfirmed;
     bool public tombstoned;
     uint256 public totalAllocated;
     uint256 public totalReleased;
+    uint256 public legalHoldTransferred;
     uint64 public nextSequence;
 
     mapping(bytes32 subscriptionId => Allocation allocation) private _allocations;
@@ -72,7 +79,9 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
     error EscrowTombstoned();
     error AllocationNotFound(bytes32 subscriptionId);
     error AllocationAlreadyReleased(bytes32 subscriptionId);
+    error AllocationAlreadyHeld(bytes32 subscriptionId);
     error ReleasedAmountExceedsAllocated(uint256 releasedTotal, uint256 allocatedTotal);
+    error DeliveredAmountExceedsAllocated(uint256 deliveredTotal, uint256 allocatedTotal);
 
     event TokenDepositConfirmed(bytes32 indexed offeringId, address indexed revenueToken, uint256 finalSupply);
     event AllocationRegistered(
@@ -93,6 +102,14 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         address indexed destination,
         uint256 amount,
         uint256 totalReleased
+    );
+    event AllocationTransferredToLegalHold(
+        bytes32 indexed offeringId,
+        bytes32 indexed subscriptionId,
+        address indexed position,
+        address beneficialOwner,
+        uint256 amount,
+        uint256 legalHoldTransferred
     );
 
     modifier onlyOfferingManager() {
@@ -120,6 +137,7 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         offeringId = offeringId_;
         revenueToken = revenueToken_;
         finalSupply = finalSupply_;
+        legalHoldEscrow = address(new LegalHoldEscrow(offeringManager_, offeringId_, address(this), revenueToken_));
     }
 
     /// @notice Confirms the one-time exact full-supply deposit while the offering is Draft.
@@ -197,7 +215,8 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
             amount: amount,
             sequence: sequence,
             exists: true,
-            released: false
+            released: false,
+            legalHeld: false
         });
         allocationHash[subscriptionId] = recordHash;
         totalAllocated = requestedTotal;
@@ -227,10 +246,12 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         Allocation storage allocation = _allocations[subscriptionId];
         if (!allocation.exists) revert AllocationNotFound(subscriptionId);
         if (allocation.released) revert AllocationAlreadyReleased(subscriptionId);
+        if (allocation.legalHeld) revert AllocationAlreadyHeld(subscriptionId);
 
         uint256 releasedTotal = totalReleased + allocation.amount;
-        if (releasedTotal > totalAllocated || releasedTotal > finalSupply) {
-            revert ReleasedAmountExceedsAllocated(releasedTotal, totalAllocated);
+        uint256 deliveredTotal = releasedTotal + legalHoldTransferred;
+        if (deliveredTotal > totalAllocated || deliveredTotal > finalSupply) {
+            revert ReleasedAmountExceedsAllocated(deliveredTotal, totalAllocated);
         }
 
         allocation.released = true;
@@ -238,6 +259,47 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         IRevenueTokenSupply(revenueToken).executePrimaryDelivery(allocation.destination, allocation.amount);
 
         emit AllocationReleased(offeringId, subscriptionId, allocation.destination, allocation.amount, releasedTotal);
+    }
+
+    /// @notice Moves one frozen remediation allocation into its isolated legal-hold position.
+    function holdAllocation(bytes32 subscriptionId)
+        external
+        onlyOfferingManager
+        nonReentrant
+        returns (address position)
+    {
+        if (tombstoned) revert EscrowTombstoned();
+        if (!depositConfirmed) revert DepositNotConfirmed();
+
+        uint8 status = IOfferingManagerStatus(offeringManager).getOfferingStatus(offeringId);
+        if (status != STATUS_SUCCESSFUL) {
+            revert InvalidOfferingStatus(STATUS_SUCCESSFUL, status);
+        }
+
+        Allocation storage allocation = _allocations[subscriptionId];
+        if (!allocation.exists) revert AllocationNotFound(subscriptionId);
+        if (allocation.released) revert AllocationAlreadyReleased(subscriptionId);
+        if (allocation.legalHeld) revert AllocationAlreadyHeld(subscriptionId);
+
+        uint256 heldTotal = legalHoldTransferred + allocation.amount;
+        uint256 deliveredTotal = totalReleased + heldTotal;
+        if (deliveredTotal > totalAllocated || deliveredTotal > finalSupply) {
+            revert DeliveredAmountExceedsAllocated(deliveredTotal, totalAllocated);
+        }
+
+        position = ILegalHoldEscrow(legalHoldEscrow)
+            .createPosition(subscriptionId, allocation.destination, allocation.amount, allocation.sequence);
+        allocation.legalHeld = true;
+        legalHoldTransferred = heldTotal;
+        IRevenueTokenSupply(revenueToken).executePrimaryLegalHoldDelivery(subscriptionId, position, allocation.amount);
+
+        emit AllocationTransferredToLegalHold(
+            offeringId, subscriptionId, position, allocation.destination, allocation.amount, heldTotal
+        );
+    }
+
+    function totalDelivered() external view returns (uint256) {
+        return totalReleased + legalHoldTransferred;
     }
 
     function getAllocation(bytes32 subscriptionId) external view returns (Allocation memory) {

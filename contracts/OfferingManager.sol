@@ -11,6 +11,7 @@ import {IAllocationEscrow} from "./interfaces/IAllocationEscrow.sol";
 import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
 import {IInvestorEligibility} from "./interfaces/IInvestorEligibility.sol";
 import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
+import {ILegalHoldEscrow} from "./interfaces/ILegalHoldEscrow.sol";
 import {IOfferingEscrow} from "./interfaces/IOfferingEscrow.sol";
 
 /// @notice Issuer/SPV verification boundary; deliberately separate from investor and asset-owner roles.
@@ -91,8 +92,10 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         uint64 subscribedAt;
         uint64 reconciledAt;
         uint64 deliveredAt;
+        uint64 legalHoldReleasedAt;
         uint8 invalidReason;
         bool deliveryProcessed;
+        address legalHoldPosition;
         SubscriptionStatus status;
     }
 
@@ -189,6 +192,9 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     error DeliverySequenceOutOfBounds(uint64 sequence, uint64 subscriptionCount);
     error SubscriptionDeliveryAlreadyProcessed(bytes32 subscriptionId);
     error TokenDistributionEscrowMismatch(address expected, address actual);
+    error LegalHoldPositionMissing(bytes32 subscriptionId);
+    error LegalHoldPositionAlreadyReleased(bytes32 subscriptionId);
+    error LegalHoldReleaseEligibilityInvalid(bytes32 subscriptionId, uint8 reason);
 
     event OfferingCreated(
         bytes32 indexed offeringId,
@@ -237,6 +243,22 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     );
     event AllocationDeliveryRemediation(
         bytes32 indexed offeringId, bytes32 indexed subscriptionId, uint64 indexed sequence, uint8 reason
+    );
+    event AllocationDeliveredToLegalHold(
+        bytes32 indexed offeringId,
+        bytes32 indexed subscriptionId,
+        uint64 indexed sequence,
+        address position,
+        address beneficialOwner,
+        uint256 amount,
+        uint8 reason
+    );
+    event LegalHoldAllocationReleased(
+        bytes32 indexed offeringId,
+        bytes32 indexed subscriptionId,
+        address indexed position,
+        address beneficialOwner,
+        uint256 amount
     );
 
     constructor(address admin_, address identityRegistry_, address assetRegistry_, address issuerEligibility_) {
@@ -516,6 +538,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         offering.deliveredCount = sequence + 1;
 
         if (subscription.status == SubscriptionStatus.Remediation) {
+            _holdRemediationAllocation(offering, subscription);
             emit AllocationDeliveryRemediation(offeringId, subscriptionId, sequence, subscription.invalidReason);
             return;
         }
@@ -527,6 +550,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         if (!IInvestorEligibility(config.investorEligibility).canHold(subscription.destination, config.assetId)) {
             subscription.status = SubscriptionStatus.Remediation;
             subscription.invalidReason |= INVALID_DESTINATION_ELIGIBILITY;
+            _holdRemediationAllocation(offering, subscription);
             emit SubscriptionRemediationFlagged(offeringId, subscriptionId, subscription.invalidReason);
             emit AllocationDeliveryRemediation(offeringId, subscriptionId, sequence, subscription.invalidReason);
             return;
@@ -535,6 +559,51 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         IAllocationEscrow(config.allocationEscrow).releaseAllocation(subscriptionId);
         emit AllocationDelivered(
             offeringId, subscriptionId, sequence, subscription.destination, subscription.filledAllocation
+        );
+    }
+
+    /// @notice Releases one isolated remediation position only to its original, currently eligible beneficiary.
+    function releaseLegalHold(bytes32 offeringId, uint64 sequence) external nonReentrant {
+        Offering storage offering = _getOffering(offeringId);
+        if (offering.status != OfferingStatus.Successful && offering.status != OfferingStatus.Finalized) {
+            revert InvalidOfferingStatus(offeringId, offering.status, OfferingStatus.Successful);
+        }
+        if (sequence >= offering.nextSequence) {
+            revert DeliverySequenceOutOfBounds(sequence, offering.nextSequence);
+        }
+
+        bytes32 subscriptionId = subscriptionIdBySequence[offeringId][sequence];
+        Subscription storage subscription = _subscriptions[subscriptionId];
+        address position = subscription.legalHoldPosition;
+        if (position == address(0)) revert LegalHoldPositionMissing(subscriptionId);
+        if (subscription.legalHoldReleasedAt != 0) {
+            revert LegalHoldPositionAlreadyReleased(subscriptionId);
+        }
+
+        uint8 reason = _currentInvalidReason(offering.config, subscription);
+        if (reason != 0) revert LegalHoldReleaseEligibilityInvalid(subscriptionId, reason);
+
+        subscription.legalHoldReleasedAt = uint64(block.timestamp);
+        address holdEscrow = IAllocationEscrow(offering.config.allocationEscrow).legalHoldEscrow();
+        ILegalHoldEscrow(holdEscrow).releasePosition(subscriptionId);
+
+        emit LegalHoldAllocationReleased(
+            offeringId, subscriptionId, position, subscription.destination, subscription.filledAllocation
+        );
+    }
+
+    function _holdRemediationAllocation(Offering storage offering, Subscription storage subscription) private {
+        address position =
+            IAllocationEscrow(offering.config.allocationEscrow).holdAllocation(subscription.subscriptionId);
+        subscription.legalHoldPosition = position;
+        emit AllocationDeliveredToLegalHold(
+            subscription.offeringId,
+            subscription.subscriptionId,
+            subscription.sequence,
+            position,
+            subscription.destination,
+            subscription.filledAllocation,
+            subscription.invalidReason
         );
     }
 

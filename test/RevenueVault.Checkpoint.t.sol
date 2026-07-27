@@ -238,6 +238,9 @@ contract RevenueVaultCheckpointTest is Test {
     function testOnlyBoundRevenueTokenCanMigrateRevenueState() public {
         vm.expectRevert(abi.encodeWithSelector(RevenueVault.OnlyRevenueToken.selector, address(this)));
         vault.checkpointRecovery(alice, bob, FINAL_SUPPLY);
+
+        vm.expectRevert(abi.encodeWithSelector(RevenueVault.OnlyRevenueToken.selector, address(this)));
+        vault.checkpointLegalHoldRelease(alice, bob, FINAL_SUPPLY);
     }
 
     function _deposit(uint256 amount) private {

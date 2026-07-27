@@ -13,4 +13,8 @@ interface IRevenueVault {
     /// @notice Settles both accounts and migrates all source pending rewards to the destination.
     /// @dev Must be called by the bound revenue token before a full-balance recovery update.
     function checkpointRecovery(address source, address destination, uint256 amount) external;
+
+    /// @notice Migrates one isolated legal-hold position's complete reward state.
+    /// @dev Must be called by the bound revenue token before the full position balance moves.
+    function checkpointLegalHoldRelease(address source, address destination, uint256 amount) external;
 }

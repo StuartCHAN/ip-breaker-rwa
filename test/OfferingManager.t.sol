@@ -13,6 +13,7 @@ import {IAllocationEscrow} from "../contracts/interfaces/IAllocationEscrow.sol";
 import {IIdentityRegistry} from "../contracts/interfaces/IIdentityRegistry.sol";
 import {IInvestorEligibility} from "../contracts/interfaces/IInvestorEligibility.sol";
 import {IIPAssetRegistry} from "../contracts/interfaces/IIPAssetRegistry.sol";
+import {ILegalHoldEscrow} from "../contracts/interfaces/ILegalHoldEscrow.sol";
 import {IRecoveryManager} from "../contracts/interfaces/IRecoveryManager.sol";
 import {IRevenueVault} from "../contracts/interfaces/IRevenueVault.sol";
 
@@ -1053,6 +1054,37 @@ contract OfferingManagerTest is Test {
         assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
     }
 
+    function testDirectAndLegalHoldDeliveryConserveFinalSupply() public {
+        bytes32 offeringId = _openOffering();
+        _prepareInvestor(investor, destination);
+        _prepareInvestor(secondInvestor, secondDestination);
+        vm.prank(investor);
+        manager.subscribe(offeringId, 4_000 ether, 0, destination, keccak256("direct-allocation"));
+        vm.prank(secondInvestor);
+        manager.subscribe(offeringId, 6_000 ether, 0, secondDestination, keccak256("held-allocation"));
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        manager.reconcileSubscription(offeringId, 1);
+        investorEligibility.setEligible(secondDestination, ASSET_ID, false);
+        uint256 contributedBefore = offeringEscrow.totalContributed();
+
+        manager.deliverAllocation(offeringId, 0);
+        manager.deliverAllocation(offeringId, 1);
+
+        bytes32 heldSubscription = manager.subscriptionIdBySequence(offeringId, 1);
+        address position = manager.getSubscription(heldSubscription).legalHoldPosition;
+        assertEq(allocationEscrow.totalReleased(), 4_000 ether);
+        assertEq(allocationEscrow.legalHoldTransferred(), 6_000 ether);
+        assertEq(allocationEscrow.totalDelivered(), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), 0);
+        assertEq(revenueToken.balanceOf(destination), 4_000 ether);
+        assertEq(revenueToken.balanceOf(position), 6_000 ether);
+        assertEq(revenueToken.totalSupply(), FINAL_SUPPLY);
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
+        assertEq(offeringEscrow.totalContributed(), contributedBefore);
+        assertEq(usdc.balanceOf(address(manager)), 0);
+    }
+
     function testIneligibleDestinationEntersRemediationWithoutAddressReplacement() public {
         bytes32 offeringId = _subscribeFullOffering();
         bytes32 subscriptionId = manager.subscriptionIdBySequence(offeringId, 0);
@@ -1070,8 +1102,16 @@ contract OfferingManagerTest is Test {
         assertEq(subscription.destination, destination);
         assertEq(allocation.destination, destination);
         assertFalse(allocation.released);
+        assertTrue(allocation.legalHeld);
+        assertEq(
+            subscription.legalHoldPosition,
+            ILegalHoldEscrow(allocationEscrow.legalHoldEscrow()).positionOf(subscriptionId)
+        );
         assertEq(allocationEscrow.totalReleased(), 0);
-        assertEq(revenueToken.balanceOf(address(allocationEscrow)), FINAL_SUPPLY);
+        assertEq(allocationEscrow.legalHoldTransferred(), FINAL_SUPPLY);
+        assertEq(allocationEscrow.totalDelivered(), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), 0);
+        assertEq(revenueToken.balanceOf(subscription.legalHoldPosition), FINAL_SUPPLY);
 
         (bool replacementSuccess,) = address(manager)
             .call(
@@ -1081,6 +1121,61 @@ contract OfferingManagerTest is Test {
             );
         assertFalse(replacementSuccess);
         assertEq(revenueToken.balanceOf(secondDestination), 0);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.LegalHoldReleaseEligibilityInvalid.selector,
+                subscriptionId,
+                manager.INVALID_DESTINATION_ELIGIBILITY()
+            )
+        );
+        manager.releaseLegalHold(offeringId, 0);
+
+        uint256 contributedBefore = offeringEscrow.totalContributed();
+        uint256 usdcBefore = usdc.balanceOf(address(offeringEscrow));
+        investorEligibility.setEligible(destination, ASSET_ID, true);
+        vm.prank(outsider);
+        manager.releaseLegalHold(offeringId, 0);
+
+        subscription = manager.getSubscription(subscriptionId);
+        ILegalHoldEscrow.LegalHoldPosition memory releasedPosition =
+            ILegalHoldEscrow(allocationEscrow.legalHoldEscrow()).getPosition(subscriptionId);
+        assertGt(subscription.legalHoldReleasedAt, 0);
+        assertEq(uint256(releasedPosition.status), uint256(ILegalHoldEscrow.PositionStatus.Released));
+        assertEq(revenueToken.balanceOf(subscription.legalHoldPosition), 0);
+        assertEq(revenueToken.balanceOf(destination), FINAL_SUPPLY);
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
+        assertEq(offeringEscrow.totalContributed(), contributedBefore);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), usdcBefore);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(OfferingManager.LegalHoldPositionAlreadyReleased.selector, subscriptionId)
+        );
+        manager.releaseLegalHold(offeringId, 0);
+    }
+
+    function testLegalHoldRewardMigrationFailureRollsBackTokenAndPosition() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        bytes32 subscriptionId = manager.subscriptionIdBySequence(offeringId, 0);
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        investorEligibility.setEligible(destination, ASSET_ID, false);
+        manager.deliverAllocation(offeringId, 0);
+        address position = manager.getSubscription(subscriptionId).legalHoldPosition;
+
+        investorEligibility.setEligible(destination, ASSET_ID, true);
+        revenueVault.setCheckpointFailure(true);
+        vm.expectRevert(OfferingRevenueVaultMock.CheckpointFailed.selector);
+        manager.releaseLegalHold(offeringId, 0);
+
+        OfferingManager.Subscription memory subscription = manager.getSubscription(subscriptionId);
+        ILegalHoldEscrow.LegalHoldPosition memory heldPosition =
+            ILegalHoldEscrow(allocationEscrow.legalHoldEscrow()).getPosition(subscriptionId);
+        assertEq(subscription.legalHoldReleasedAt, 0);
+        assertEq(uint256(heldPosition.status), uint256(ILegalHoldEscrow.PositionStatus.Held));
+        assertEq(revenueToken.balanceOf(position), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(destination), 0);
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
     }
 
     function testTokenTransferFailureRollsBackEntireDelivery() public {
@@ -1375,6 +1470,11 @@ contract OfferingRevenueVaultMock is IRevenueVault {
     function checkpointRecovery(address, address, uint256) external view {
         if (msg.sender != address(revenueToken)) revert UnauthorizedToken();
     }
+
+    function checkpointLegalHoldRelease(address, address, uint256) external view {
+        if (msg.sender != address(revenueToken)) revert UnauthorizedToken();
+        if (_checkpointFailure) revert CheckpointFailed();
+    }
 }
 
 contract OfferingRecoveryManagerMock is IRecoveryManager {
@@ -1392,6 +1492,8 @@ contract FaultingAllocationEscrow is IAllocationEscrow {
     bool public tombstoned;
     uint256 public totalAllocated;
     uint256 public totalReleased;
+    uint256 public legalHoldTransferred;
+    address public legalHoldEscrow;
     bool private immutable _confirmationFailure;
     bool private immutable _refuseConfirmation;
 
@@ -1424,6 +1526,14 @@ contract FaultingAllocationEscrow is IAllocationEscrow {
 
     function releaseAllocation(bytes32) external {}
 
+    function holdAllocation(bytes32) external pure returns (address position) {
+        return address(0);
+    }
+
+    function totalDelivered() external view returns (uint256) {
+        return totalReleased + legalHoldTransferred;
+    }
+
     function tombstone() external {
         tombstoned = true;
     }
@@ -1438,6 +1548,8 @@ contract SubscriptionAllocationEscrowFault is IAllocationEscrow {
     bool public tombstoned;
     uint256 public totalAllocated;
     uint256 public totalReleased;
+    uint256 public legalHoldTransferred;
+    address public legalHoldEscrow;
 
     bool private immutable _failRegistration;
     bool private immutable _misreportTotal;
@@ -1472,6 +1584,14 @@ contract SubscriptionAllocationEscrowFault is IAllocationEscrow {
 
     function releaseAllocation(bytes32) external {}
 
+    function holdAllocation(bytes32) external pure returns (address position) {
+        return address(0);
+    }
+
+    function totalDelivered() external view returns (uint256) {
+        return totalReleased + legalHoldTransferred;
+    }
+
     function tombstone() external {
         tombstoned = true;
     }
@@ -1486,6 +1606,8 @@ contract TombstoneFailAllocationEscrow is IAllocationEscrow {
     bool public tombstoned;
     uint256 public totalAllocated;
     uint256 public totalReleased;
+    uint256 public legalHoldTransferred;
+    address public legalHoldEscrow;
 
     error TombstoneFailed();
 
@@ -1505,6 +1627,14 @@ contract TombstoneFailAllocationEscrow is IAllocationEscrow {
     }
 
     function releaseAllocation(bytes32) external {}
+
+    function holdAllocation(bytes32) external pure returns (address position) {
+        return address(0);
+    }
+
+    function totalDelivered() external view returns (uint256) {
+        return totalReleased + legalHoldTransferred;
+    }
 
     function tombstone() external pure {
         revert TombstoneFailed();

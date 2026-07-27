@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {AllocationEscrow} from "../contracts/AllocationEscrow.sol";
+import {ILegalHoldEscrow} from "../contracts/interfaces/ILegalHoldEscrow.sol";
 
 contract AllocationEscrowTest is Test {
     uint256 private constant FINAL_SUPPLY = 10_000 ether;
@@ -38,6 +39,11 @@ contract AllocationEscrowTest is Test {
         assertEq(escrow.offeringId(), OFFERING_ID);
         assertEq(escrow.revenueToken(), address(token));
         assertEq(escrow.finalSupply(), FINAL_SUPPLY);
+        ILegalHoldEscrow holdEscrow = ILegalHoldEscrow(escrow.legalHoldEscrow());
+        assertEq(holdEscrow.offeringManager(), address(manager));
+        assertEq(holdEscrow.offeringId(), OFFERING_ID);
+        assertEq(holdEscrow.allocationEscrow(), address(escrow));
+        assertEq(holdEscrow.revenueToken(), address(token));
     }
 
     function testExactDepositConfirmation() public {
@@ -236,6 +242,90 @@ contract AllocationEscrowTest is Test {
         assertEq(token.balanceOf(investor), 0);
     }
 
+    function testRemediationAllocationMovesToIsolatedLegalHoldPosition() public {
+        bytes32 subscriptionId = _prepareAllocation(investor, 4_000 ether);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+
+        address position = manager.holdAllocation(escrow, subscriptionId);
+        AllocationEscrow.Allocation memory allocation = escrow.getAllocation(subscriptionId);
+        ILegalHoldEscrow.LegalHoldPosition memory heldPosition =
+            ILegalHoldEscrow(escrow.legalHoldEscrow()).getPosition(subscriptionId);
+
+        assertTrue(allocation.legalHeld);
+        assertFalse(allocation.released);
+        assertEq(heldPosition.position, position);
+        assertEq(heldPosition.beneficialOwner, investor);
+        assertEq(heldPosition.amount, 4_000 ether);
+        assertEq(heldPosition.sequence, 0);
+        assertEq(uint256(heldPosition.status), uint256(ILegalHoldEscrow.PositionStatus.Held));
+        assertEq(escrow.legalHoldTransferred(), 4_000 ether);
+        assertEq(escrow.totalDelivered(), 4_000 ether);
+        assertEq(token.balanceOf(position), 4_000 ether);
+        assertEq(token.balanceOf(address(escrow)), FINAL_SUPPLY - 4_000 ether);
+
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.AllocationAlreadyHeld.selector, subscriptionId));
+        manager.holdAllocation(escrow, subscriptionId);
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.AllocationAlreadyHeld.selector, subscriptionId));
+        manager.releaseAllocation(escrow, subscriptionId);
+    }
+
+    function testUnauthorizedOrUnknownLegalHoldInstructionRejected() public {
+        bytes32 subscriptionId = _prepareAllocation(investor, 1 ether);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.UnauthorizedOfferingManager.selector, outsider));
+        escrow.holdAllocation(subscriptionId);
+
+        bytes32 unknownId = keccak256("unknown");
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.AllocationNotFound.selector, unknownId));
+        manager.holdAllocation(escrow, unknownId);
+
+        (bool amountOverrideSuccess,) = address(escrow)
+            .call(abi.encodeWithSignature("holdAllocation(bytes32,uint256)", subscriptionId, uint256(2 ether)));
+        assertFalse(amountOverrideSuccess);
+        assertEq(escrow.legalHoldTransferred(), 0);
+    }
+
+    function testLegalHoldTransferFailureRollsBackPositionAndAccounting() public {
+        bytes32 subscriptionId = _prepareAllocation(investor, 1 ether);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+        token.setDeliveryFailure(true);
+
+        vm.expectRevert(AllocationTokenMock.DeliveryFailed.selector);
+        manager.holdAllocation(escrow, subscriptionId);
+
+        assertFalse(escrow.getAllocation(subscriptionId).legalHeld);
+        assertEq(escrow.legalHoldTransferred(), 0);
+        assertEq(ILegalHoldEscrow(escrow.legalHoldEscrow()).positionOf(subscriptionId), address(0));
+        assertEq(token.balanceOf(address(escrow)), FINAL_SUPPLY);
+    }
+
+    function testFuzzDirectAndLegalHoldDeliveryConserveSupply(uint256 directAmount) public {
+        directAmount = bound(directAmount, 1, FINAL_SUPPLY - 1);
+        uint256 heldAmount = FINAL_SUPPLY - directAmount;
+        token.mint(address(escrow), FINAL_SUPPLY);
+        manager.confirmDeposit(escrow);
+        manager.setOfferingStatus(OFFERING_ID, 2);
+        bytes32 directId = keccak256(abi.encode("direct", directAmount));
+        bytes32 heldId = keccak256(abi.encode("held", heldAmount));
+        manager.registerAllocation(escrow, directId, keccak256("direct-investor"), investor, directAmount, 0);
+        manager.registerAllocation(escrow, heldId, keccak256("held-investor"), outsider, heldAmount, 1);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+
+        manager.releaseAllocation(escrow, directId);
+        address position = manager.holdAllocation(escrow, heldId);
+
+        assertEq(escrow.totalReleased(), directAmount);
+        assertEq(escrow.legalHoldTransferred(), heldAmount);
+        assertEq(escrow.totalDelivered(), FINAL_SUPPLY);
+        assertLe(escrow.totalDelivered(), FINAL_SUPPLY);
+        assertEq(token.balanceOf(address(escrow)), 0);
+        assertEq(token.balanceOf(investor), directAmount);
+        assertEq(token.balanceOf(position), heldAmount);
+        assertEq(token.totalSupply(), FINAL_SUPPLY);
+    }
+
     function _prepareAllocation(address destination, uint256 amount) private returns (bytes32 subscriptionId) {
         token.mint(address(escrow), FINAL_SUPPLY);
         manager.confirmDeposit(escrow);
@@ -278,6 +368,14 @@ contract AllocationManagerMock {
     function releaseAllocation(AllocationEscrow escrow, bytes32 subscriptionId) external {
         escrow.releaseAllocation(subscriptionId);
     }
+
+    function holdAllocation(AllocationEscrow escrow, bytes32 subscriptionId) external returns (address position) {
+        return escrow.holdAllocation(subscriptionId);
+    }
+
+    function releaseLegalHold(ILegalHoldEscrow holdEscrow, bytes32 subscriptionId) external {
+        holdEscrow.releasePosition(subscriptionId);
+    }
 }
 
 contract AllocationTokenMock is ERC20 {
@@ -301,5 +399,15 @@ contract AllocationTokenMock is ERC20 {
     function executePrimaryDelivery(address destination, uint256 amount) external {
         if (_deliveryFailure) revert DeliveryFailed();
         _transfer(msg.sender, destination, amount);
+    }
+
+    function executePrimaryLegalHoldDelivery(bytes32, address position, uint256 amount) external {
+        if (_deliveryFailure) revert DeliveryFailed();
+        _transfer(msg.sender, position, amount);
+    }
+
+    function executeLegalHoldRelease(bytes32, address source, address destination, uint256 amount) external {
+        if (_deliveryFailure) revert DeliveryFailed();
+        _transfer(source, destination, amount);
     }
 }
