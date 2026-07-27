@@ -7,6 +7,8 @@ import {IRevenueVault} from "../../contracts/interfaces/IRevenueVault.sol";
 
 contract MockRevenueVault is IRevenueVault {
     IERC20 public immutable override revenueToken;
+    address public immutable activationController;
+    DepositLifecycle public depositLifecycle;
 
     uint256 public checkpointCount;
     bool public checkpointShouldRevert;
@@ -15,6 +17,11 @@ contract MockRevenueVault is IRevenueVault {
 
     constructor(address revenueToken_) {
         revenueToken = IERC20(revenueToken_);
+        activationController = msg.sender;
+    }
+
+    function enableDeposits() external {
+        depositLifecycle = DepositLifecycle.Enabled;
     }
 
     function setCheckpointShouldRevert(bool shouldRevert) external {

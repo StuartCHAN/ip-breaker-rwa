@@ -7,6 +7,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+import {ILicenseRevenueTokenLifecycle} from "./interfaces/ILicenseRevenueTokenLifecycle.sol";
 import {IRevenueVault} from "./interfaces/IRevenueVault.sol";
 
 /// @title RevenueVault
@@ -20,6 +21,8 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
 
     IERC20 public immutable override revenueToken;
     IERC20 public immutable settlementToken;
+    address public immutable override activationController;
+    DepositLifecycle public override depositLifecycle;
 
     uint256 public accumulatedRewardPerShare;
     uint256 public precisionRemainder;
@@ -33,7 +36,12 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
     error ZeroSettlementToken();
     error ZeroAdmin();
     error ZeroDepositor();
+    error ZeroActivationController();
     error ZeroDeposit();
+    error DepositsDisabled();
+    error UnauthorizedActivationController(address caller);
+    error DepositsAlreadyEnabled();
+    error RevenueTokenNotActivated(ILicenseRevenueTokenLifecycle.Lifecycle lifecycle);
     error ZeroRevenueTokenSupply();
     error UnsupportedSettlementTransfer(uint256 requested, uint256 received);
     error NothingToClaim(address account);
@@ -49,6 +57,7 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
     event RevenueDeposited(
         address indexed depositor, uint256 amount, uint256 accumulatedRewardPerShare, uint256 precisionRemainder
     );
+    event DepositsEnabled(address indexed activationController);
     event RevenueClaimed(address indexed account, uint256 amount, uint256 totalClaimed);
     event TransferCheckpointed(address indexed from, address indexed to, uint256 amount);
     event RevenueStateMigrated(
@@ -58,22 +67,46 @@ contract RevenueVault is AccessControl, ReentrancyGuard, IRevenueVault {
         address indexed source, address indexed destination, uint256 tokenAmount, uint256 pendingRewardAmount
     );
 
-    constructor(address revenueToken_, address settlementToken_, address admin_, address depositor_) {
+    constructor(
+        address revenueToken_,
+        address settlementToken_,
+        address admin_,
+        address depositor_,
+        address activationController_
+    ) {
         if (revenueToken_ == address(0)) revert ZeroRevenueToken();
         if (settlementToken_ == address(0)) revert ZeroSettlementToken();
         if (admin_ == address(0)) revert ZeroAdmin();
         if (depositor_ == address(0)) revert ZeroDepositor();
+        if (activationController_ == address(0)) revert ZeroActivationController();
 
         revenueToken = IERC20(revenueToken_);
         settlementToken = IERC20(settlementToken_);
+        activationController = activationController_;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(REVENUE_DEPOSITOR_ROLE, depositor_);
     }
 
+    /// @notice Permanently enables accounted revenue deposits after the bound Token is active.
+    function enableDeposits() external nonReentrant {
+        if (msg.sender != activationController) revert UnauthorizedActivationController(msg.sender);
+        if (depositLifecycle == DepositLifecycle.Enabled) revert DepositsAlreadyEnabled();
+
+        ILicenseRevenueTokenLifecycle.Lifecycle tokenLifecycle =
+            ILicenseRevenueTokenLifecycle(address(revenueToken)).lifecycle();
+        if (tokenLifecycle != ILicenseRevenueTokenLifecycle.Lifecycle.Activated) {
+            revert RevenueTokenNotActivated(tokenLifecycle);
+        }
+
+        depositLifecycle = DepositLifecycle.Enabled;
+        emit DepositsEnabled(msg.sender);
+    }
+
     /// @notice Deposits accounted settlement revenue for all current revenue-token shares.
     /// @dev Direct token transfers to this contract are not accounted deposits.
     function depositRevenue(uint256 amount) external onlyRole(REVENUE_DEPOSITOR_ROLE) nonReentrant {
+        if (depositLifecycle != DepositLifecycle.Enabled) revert DepositsDisabled();
         if (amount == 0) revert ZeroDeposit();
 
         uint256 supply = revenueToken.totalSupply();

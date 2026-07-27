@@ -6,14 +6,17 @@ import {Test} from "forge-std/Test.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
 import {RevenueVault} from "../contracts/RevenueVault.sol";
+import {ILicenseRevenueTokenLifecycle} from "../contracts/interfaces/ILicenseRevenueTokenLifecycle.sol";
+import {IRevenueVault} from "../contracts/interfaces/IRevenueVault.sol";
 
 contract RevenueVaultTest is Test {
-    ERC20Mock private revenueToken;
+    LifecycleERC20Mock private revenueToken;
     ERC20Mock private settlementToken;
     RevenueVault private vault;
 
     address private admin = makeAddr("admin");
     address private depositor = makeAddr("depositor");
+    address private activationController = makeAddr("activation-controller");
     address private alice = makeAddr("alice");
     address private bob = makeAddr("bob");
     address private outsider = makeAddr("outsider");
@@ -21,14 +24,20 @@ contract RevenueVaultTest is Test {
     uint256 private constant ALICE_SHARES = 600 ether;
     uint256 private constant BOB_SHARES = 400 ether;
 
+    event DepositsEnabled(address indexed activationController);
+
     function setUp() public {
-        revenueToken = new ERC20Mock();
+        revenueToken = new LifecycleERC20Mock();
         settlementToken = new ERC20Mock();
 
         revenueToken.mint(alice, ALICE_SHARES);
         revenueToken.mint(bob, BOB_SHARES);
 
-        vault = new RevenueVault(address(revenueToken), address(settlementToken), admin, depositor);
+        vault =
+            new RevenueVault(address(revenueToken), address(settlementToken), admin, depositor, activationController);
+        revenueToken.setLifecycle(ILicenseRevenueTokenLifecycle.Lifecycle.Activated);
+        vm.prank(activationController);
+        vault.enableDeposits();
 
         settlementToken.mint(depositor, 1_000_000 ether);
         vm.prank(depositor);
@@ -40,20 +49,117 @@ contract RevenueVaultTest is Test {
         assertEq(address(vault.settlementToken()), address(settlementToken));
         assertTrue(vault.hasRole(vault.DEFAULT_ADMIN_ROLE(), admin));
         assertTrue(vault.hasRole(vault.REVENUE_DEPOSITOR_ROLE(), depositor));
+        assertEq(vault.activationController(), activationController);
+        assertEq(uint256(vault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Enabled));
     }
 
     function testConstructorRejectsZeroAddresses() public {
         vm.expectRevert(RevenueVault.ZeroRevenueToken.selector);
-        new RevenueVault(address(0), address(settlementToken), admin, depositor);
+        new RevenueVault(address(0), address(settlementToken), admin, depositor, activationController);
 
         vm.expectRevert(RevenueVault.ZeroSettlementToken.selector);
-        new RevenueVault(address(revenueToken), address(0), admin, depositor);
+        new RevenueVault(address(revenueToken), address(0), admin, depositor, activationController);
 
         vm.expectRevert(RevenueVault.ZeroAdmin.selector);
-        new RevenueVault(address(revenueToken), address(settlementToken), address(0), depositor);
+        new RevenueVault(address(revenueToken), address(settlementToken), address(0), depositor, activationController);
 
         vm.expectRevert(RevenueVault.ZeroDepositor.selector);
-        new RevenueVault(address(revenueToken), address(settlementToken), admin, address(0));
+        new RevenueVault(address(revenueToken), address(settlementToken), admin, address(0), activationController);
+
+        vm.expectRevert(RevenueVault.ZeroActivationController.selector);
+        new RevenueVault(address(revenueToken), address(settlementToken), admin, depositor, address(0));
+    }
+
+    function testDepositRejectedWhileDisabled() public {
+        RevenueVault disabledVault = _newDisabledVault();
+        vm.prank(depositor);
+        settlementToken.approve(address(disabledVault), 1 ether);
+
+        vm.prank(depositor);
+        vm.expectRevert(RevenueVault.DepositsDisabled.selector);
+        disabledVault.depositRevenue(1 ether);
+
+        assertEq(disabledVault.totalDeposited(), 0);
+        assertEq(settlementToken.balanceOf(address(disabledVault)), 0);
+    }
+
+    function testUnauthorizedEnableAndAdminBypassRejected() public {
+        RevenueVault disabledVault = _newDisabledVault();
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(RevenueVault.UnauthorizedActivationController.selector, outsider));
+        disabledVault.enableDeposits();
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(RevenueVault.UnauthorizedActivationController.selector, admin));
+        disabledVault.enableDeposits();
+
+        assertEq(uint256(disabledVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Disabled));
+    }
+
+    function testEnableBeforeTokenActivationRejectedWithoutMutation() public {
+        revenueToken.setLifecycle(ILicenseRevenueTokenLifecycle.Lifecycle.Minting);
+        RevenueVault disabledVault = _newDisabledVault();
+
+        vm.prank(activationController);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RevenueVault.RevenueTokenNotActivated.selector, ILicenseRevenueTokenLifecycle.Lifecycle.Minting
+            )
+        );
+        disabledVault.enableDeposits();
+
+        assertEq(uint256(disabledVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Disabled));
+        assertEq(disabledVault.totalDeposited(), 0);
+    }
+
+    function testSuccessfulEnableIsOneWayAndAllowsDeposit() public {
+        RevenueVault disabledVault = _newDisabledVault();
+        vm.expectEmit(true, false, false, true, address(disabledVault));
+        emit DepositsEnabled(activationController);
+        vm.prank(activationController);
+        disabledVault.enableDeposits();
+
+        assertEq(uint256(disabledVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Enabled));
+
+        vm.prank(activationController);
+        vm.expectRevert(RevenueVault.DepositsAlreadyEnabled.selector);
+        disabledVault.enableDeposits();
+
+        vm.prank(depositor);
+        settlementToken.approve(address(disabledVault), 100 ether);
+        vm.prank(depositor);
+        disabledVault.depositRevenue(100 ether);
+        assertEq(disabledVault.totalDeposited(), 100 ether);
+    }
+
+    function testCheckpointsRemainUsableWhileDepositsDisabled() public {
+        RevenueVault disabledVault = _newDisabledVault();
+
+        revenueToken.checkpointTransfer(disabledVault, alice, bob, 1 ether);
+        revenueToken.checkpointRecovery(disabledVault, alice, outsider, ALICE_SHARES);
+        revenueToken.checkpointLegalHoldRelease(disabledVault, bob, outsider, BOB_SHARES);
+
+        assertEq(disabledVault.rewardDebt(alice), 0);
+        assertEq(disabledVault.rewardDebt(bob), 0);
+        assertEq(disabledVault.pendingReward(alice), 0);
+        assertEq(disabledVault.pendingReward(bob), 0);
+        assertEq(uint256(disabledVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Disabled));
+    }
+
+    function testClaimRemainsUsableWhileDepositsDisabled() public {
+        RevenueVaultHarness disabledVault = new RevenueVaultHarness(
+            address(revenueToken), address(settlementToken), admin, depositor, activationController
+        );
+        disabledVault.seedClaim(alice, 25 ether);
+        settlementToken.mint(address(disabledVault), 25 ether);
+
+        vm.prank(alice);
+        assertEq(disabledVault.claim(), 25 ether);
+
+        assertEq(settlementToken.balanceOf(alice), 25 ether);
+        assertEq(disabledVault.totalClaimed(), 25 ether);
+        assertEq(uint256(disabledVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Disabled));
     }
 
     function testAuthorizedDepositorUpdatesAccumulatorAndCustody() public {
@@ -82,9 +188,13 @@ contract RevenueVaultTest is Test {
     }
 
     function testDepositRejectedWhenRevenueSupplyIsZero() public {
-        ERC20Mock emptyRevenueToken = new ERC20Mock();
-        RevenueVault emptyVault =
-            new RevenueVault(address(emptyRevenueToken), address(settlementToken), admin, depositor);
+        LifecycleERC20Mock emptyRevenueToken = new LifecycleERC20Mock();
+        RevenueVault emptyVault = new RevenueVault(
+            address(emptyRevenueToken), address(settlementToken), admin, depositor, activationController
+        );
+        emptyRevenueToken.setLifecycle(ILicenseRevenueTokenLifecycle.Lifecycle.Activated);
+        vm.prank(activationController);
+        emptyVault.enableDeposits();
 
         vm.prank(depositor);
         settlementToken.approve(address(emptyVault), 1 ether);
@@ -95,10 +205,14 @@ contract RevenueVaultTest is Test {
     }
 
     function testPrecisionRemainderCarriesAcrossDeposits() public {
-        ERC20Mock sevenShareToken = new ERC20Mock();
+        LifecycleERC20Mock sevenShareToken = new LifecycleERC20Mock();
         sevenShareToken.mint(alice, 7);
-        RevenueVault remainderVault =
-            new RevenueVault(address(sevenShareToken), address(settlementToken), admin, depositor);
+        RevenueVault remainderVault = new RevenueVault(
+            address(sevenShareToken), address(settlementToken), admin, depositor, activationController
+        );
+        sevenShareToken.setLifecycle(ILicenseRevenueTokenLifecycle.Lifecycle.Activated);
+        vm.prank(activationController);
+        remainderVault.enableDeposits();
 
         vm.prank(depositor);
         settlementToken.approve(address(remainderVault), type(uint256).max);
@@ -194,5 +308,46 @@ contract RevenueVaultTest is Test {
     function _deposit(uint256 amount) private {
         vm.prank(depositor);
         vault.depositRevenue(amount);
+    }
+
+    function _newDisabledVault() private returns (RevenueVault) {
+        return new RevenueVault(address(revenueToken), address(settlementToken), admin, depositor, activationController);
+    }
+}
+
+contract LifecycleERC20Mock is ERC20Mock {
+    ILicenseRevenueTokenLifecycle.Lifecycle public lifecycle;
+
+    function setLifecycle(ILicenseRevenueTokenLifecycle.Lifecycle lifecycle_) external {
+        lifecycle = lifecycle_;
+    }
+
+    function checkpointTransfer(RevenueVault vault, address from, address to, uint256 amount) external {
+        vault.checkpointTransfer(from, to, amount);
+    }
+
+    function checkpointRecovery(RevenueVault vault, address source, address destination, uint256 amount) external {
+        vault.checkpointRecovery(source, destination, amount);
+    }
+
+    function checkpointLegalHoldRelease(RevenueVault vault, address source, address destination, uint256 amount)
+        external
+    {
+        vault.checkpointLegalHoldRelease(source, destination, amount);
+    }
+}
+
+contract RevenueVaultHarness is RevenueVault {
+    constructor(
+        address revenueToken_,
+        address settlementToken_,
+        address admin_,
+        address depositor_,
+        address activationController_
+    ) RevenueVault(revenueToken_, settlementToken_, admin_, depositor_, activationController_) {}
+
+    function seedClaim(address account, uint256 amount) external {
+        pendingReward[account] = amount;
+        totalDeposited = amount;
     }
 }

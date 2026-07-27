@@ -1696,6 +1696,8 @@ contract OfferingInvestorEligibilityMock is IInvestorEligibility {
 
 contract OfferingRevenueVaultMock is IRevenueVault {
     IERC20 public immutable revenueToken;
+    address public immutable activationController;
+    DepositLifecycle public depositLifecycle;
     bool private _checkpointFailure;
 
     error UnauthorizedToken();
@@ -1703,6 +1705,11 @@ contract OfferingRevenueVaultMock is IRevenueVault {
 
     constructor(address revenueToken_) {
         revenueToken = IERC20(revenueToken_);
+        activationController = msg.sender;
+    }
+
+    function enableDeposits() external {
+        depositLifecycle = DepositLifecycle.Enabled;
     }
 
     function setCheckpointFailure(bool shouldFail) external {

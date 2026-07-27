@@ -4,7 +4,18 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IRevenueVault {
+    enum DepositLifecycle {
+        Disabled,
+        Enabled
+    }
+
     function revenueToken() external view returns (IERC20);
+
+    function activationController() external view returns (address);
+
+    function depositLifecycle() external view returns (DepositLifecycle);
+
+    function enableDeposits() external;
 
     /// @notice Settles affected accounts and records debt for their projected post-update balances.
     /// @dev Must be called by the bound revenue token before its ERC-20 balance update.

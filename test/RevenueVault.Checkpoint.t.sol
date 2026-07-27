@@ -71,7 +71,7 @@ contract RevenueVaultCheckpointTest is Test {
             controller
         );
         settlementToken = new ERC20Mock();
-        vault = new RevenueVault(address(revenueToken), address(settlementToken), controller, depositor);
+        vault = new RevenueVault(address(revenueToken), address(settlementToken), controller, depositor, controller);
         recoveryManager = new RecoveryManager(controller, CHALLENGE_PERIOD, EXECUTION_WINDOW);
 
         vm.startPrank(controller);
@@ -90,6 +90,8 @@ contract RevenueVaultCheckpointTest is Test {
 
         vm.prank(controller);
         revenueToken.activate();
+        vm.prank(controller);
+        vault.enableDeposits();
 
         settlementToken.mint(depositor, 10_000 ether);
         vm.prank(depositor);

@@ -50,7 +50,9 @@ contract LegalHoldEscrowTest is Test {
             address(eligibility),
             address(manager)
         );
-        revenueVault = new RevenueVault(address(revenueToken), address(settlementToken), address(this), depositor);
+        revenueVault = new RevenueVault(
+            address(revenueToken), address(settlementToken), address(this), depositor, address(manager)
+        );
         allocationEscrow = new AllocationEscrow(address(manager), OFFERING_ID, address(revenueToken), FINAL_SUPPLY);
         legalHoldEscrow = ILegalHoldEscrow(allocationEscrow.legalHoldEscrow());
 
@@ -68,6 +70,7 @@ contract LegalHoldEscrowTest is Test {
         manager.registerAllocation(allocationEscrow, subscriptionId, alice, FINAL_SUPPLY, 0);
         manager.setOfferingStatus(OFFERING_ID, 3);
         address position = manager.holdAllocation(allocationEscrow, subscriptionId);
+        manager.activateRevenue(revenueToken, revenueVault);
         _depositRevenue(100 ether);
 
         assertEq(revenueVault.claimable(position), 100 ether);
@@ -102,7 +105,7 @@ contract LegalHoldEscrowTest is Test {
         assertEq(revenueVault.totalDeposited(), 100 ether);
         assertEq(revenueVault.totalClaimed(), 0);
         assertTrue(revenueVault.isSolvent());
-        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Activated));
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -120,6 +123,7 @@ contract LegalHoldEscrowTest is Test {
         manager.setOfferingStatus(OFFERING_ID, 3);
         address alicePosition = manager.holdAllocation(allocationEscrow, aliceSubscription);
         address bobPosition = manager.holdAllocation(allocationEscrow, bobSubscription);
+        manager.activateRevenue(revenueToken, revenueVault);
         _depositRevenue(100 ether);
 
         assertTrue(alicePosition != bobPosition);
@@ -207,6 +211,11 @@ contract LegalHoldManagerHarness {
 
     function confirmDeposit(AllocationEscrow escrow) external {
         escrow.confirmTokenDeposit();
+    }
+
+    function activateRevenue(LicenseRevenueToken token, RevenueVault vault) external {
+        token.activate();
+        vault.enableDeposits();
     }
 
     function registerAllocation(
