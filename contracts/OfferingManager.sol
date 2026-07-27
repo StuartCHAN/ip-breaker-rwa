@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -15,6 +14,8 @@ import {ILegalHoldEscrow} from "./interfaces/ILegalHoldEscrow.sol";
 import {IOfferingEscrow} from "./interfaces/IOfferingEscrow.sol";
 import {IRevenueProgramRegistry} from "./interfaces/IRevenueProgramRegistry.sol";
 import {IRevenueVault} from "./interfaces/IRevenueVault.sol";
+import {OfferingFinalizationModule} from "./modules/OfferingFinalizationModule.sol";
+import {OfferingValidationModule} from "./modules/OfferingValidationModule.sol";
 
 /// @notice Issuer/SPV verification boundary; deliberately separate from investor and asset-owner roles.
 interface IIssuerEligibility {
@@ -120,6 +121,8 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     IIPAssetRegistry public immutable assetRegistry;
     IIssuerEligibility public immutable issuerEligibility;
     IRevenueProgramRegistry public immutable revenueProgramRegistry;
+    OfferingValidationModule private immutable _validationModule;
+    OfferingFinalizationModule private immutable _finalizationModule;
 
     mapping(bytes32 offeringId => Offering offering) private _offerings;
     mapping(address creator => uint256 nonce) public creatorNonce;
@@ -308,6 +311,8 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         assetRegistry = IIPAssetRegistry(assetRegistry_);
         issuerEligibility = IIssuerEligibility(issuerEligibility_);
         revenueProgramRegistry = IRevenueProgramRegistry(revenueProgramRegistry_);
+        _validationModule = new OfferingValidationModule(assetRegistry_, issuerEligibility_, revenueProgramRegistry_);
+        _finalizationModule = new OfferingFinalizationModule(revenueProgramRegistry_);
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _setRoleAdmin(OFFERING_OPERATOR_ROLE, DEFAULT_ADMIN_ROLE);
@@ -316,7 +321,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     /// @notice Creates an immutable Draft snapshot for a verified asset owner and issuer.
     function createOffering(OfferingConfig calldata config) external returns (bytes32 offeringId) {
         _validateCreationAuthority(config.assetId, msg.sender);
-        _validateConfig(config);
+        _validationModule.validateCreationConfig(abi.encode(config));
 
         uint256 nonce = creatorNonce[msg.sender];
         offeringId = keccak256(
@@ -336,7 +341,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         revenueProgramRegistry.reserveProgram(
             offeringId, config.assetId, config.issuer, config.revenueToken, config.revenueVault, config.settlementToken
         );
-        _validateRevenueProgramBinding(offeringId, config);
+        _validationModule.validateRevenueProgramBinding(offeringId, abi.encode(config));
 
         uint256 targetUSDC = Math.mulDiv(config.finalSupply, config.pricePerWholeTokenUSDC, TOKEN_UNIT);
         creatorNonce[msg.sender] = nonce + 1;
@@ -381,8 +386,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         if (!identityRegistry.hasBusinessRole(currentOwner, ownerRole)) {
             revert AssetOwnerIdentityInvalid(currentOwner);
         }
-        if (!issuerEligibility.isEligibleIssuer(config.issuer)) revert InvalidIssuer(config.issuer);
-        _validateDependencyContracts(config);
+        _validationModule.validateOpenBundle(offeringId, abi.encode(config));
 
         _prepareTokenCustody(offeringId, config);
 
@@ -628,47 +632,20 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         _requireStatus(offeringId, offering.status, OfferingStatus.Successful);
 
         OfferingConfig storage config = offering.config;
-        if (offering.deliveredCount != offering.nextSequence) {
-            revert FinalizationDeliveryIncomplete(offering.deliveredCount, offering.nextSequence);
-        }
-
-        IAllocationEscrow allocationEscrow = IAllocationEscrow(config.allocationEscrow);
-        uint256 totalDelivered = allocationEscrow.totalDelivered();
-        if (totalDelivered != config.finalSupply) {
-            revert FinalizationDeliveredSupplyMismatch(config.finalSupply, totalDelivered);
-        }
-        uint256 directReleased = allocationEscrow.totalReleased();
-        uint256 legalHoldDelivered = allocationEscrow.legalHoldTransferred();
-        if (directReleased + legalHoldDelivered != config.finalSupply) {
-            revert FinalizationDeliveryAccountingMismatch(config.finalSupply, directReleased, legalHoldDelivered);
-        }
+        bytes memory encodedConfig = abi.encode(config);
+        _finalizationModule.validatePreconditions(
+            offering.deliveredCount, offering.nextSequence, offering.validCommittedUSDC, encodedConfig
+        );
 
         LicenseRevenueToken revenueToken = LicenseRevenueToken(config.revenueToken);
-        uint256 allocationBalance = revenueToken.balanceOf(config.allocationEscrow);
-        if (allocationBalance != 0) revert FinalizationAllocationBalanceNotZero(allocationBalance);
-
-        IOfferingEscrow offeringEscrow = IOfferingEscrow(config.offeringEscrow);
-        uint256 contributed = offeringEscrow.totalContributed();
-        if (contributed != offering.validCommittedUSDC) {
-            revert FinalizationContributionMismatch(offering.validCommittedUSDC, contributed);
-        }
-
         IRevenueVault revenueVault = IRevenueVault(config.revenueVault);
-        address vaultController = revenueVault.activationController();
-        if (vaultController != address(this)) {
-            revert VaultActivationControllerMismatch(address(this), vaultController);
-        }
-        IRevenueVault.DepositLifecycle vaultLifecycle = revenueVault.depositLifecycle();
-        if (vaultLifecycle != IRevenueVault.DepositLifecycle.Disabled) {
-            revert VaultDepositLifecycleMismatch(IRevenueVault.DepositLifecycle.Disabled, vaultLifecycle);
-        }
-
+        IOfferingEscrow offeringEscrow = IOfferingEscrow(config.offeringEscrow);
         revenueToken.activate();
         revenueProgramRegistry.activateProgram(offeringId);
         revenueVault.enableDeposits();
         offeringEscrow.enableProceeds();
 
-        _validateFinalizationPostconditions(offeringId, offering, revenueToken, revenueVault, offeringEscrow);
+        _finalizationModule.validatePostconditions(offeringId, encodedConfig);
 
         offering.status = OfferingStatus.Finalized;
         emit OfferingFinalized(offeringId, msg.sender);
@@ -826,7 +803,6 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
 
     function _prepareTokenCustody(bytes32 offeringId, OfferingConfig storage config) private {
         LicenseRevenueToken revenueToken = LicenseRevenueToken(config.revenueToken);
-        _validateTokenBundle(offeringId, revenueToken, config);
 
         // Bind only the dependencies already frozen in the Draft. If any later
         // preparation step fails, these bindings roll back with the transaction.
@@ -864,127 +840,6 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         }
     }
 
-    function _validateTokenBundle(bytes32 offeringId, LicenseRevenueToken revenueToken, OfferingConfig storage config)
-        private
-        view
-    {
-        address tokenRegistry = address(revenueToken.ipAssetRegistry());
-        if (tokenRegistry != address(assetRegistry)) {
-            revert TokenRegistryMismatch(address(assetRegistry), tokenRegistry);
-        }
-
-        uint256 tokenAssetId = revenueToken.assetId();
-        if (tokenAssetId != config.assetId) {
-            revert TokenAssetMismatch(config.assetId, tokenAssetId);
-        }
-
-        uint256 tokenFinalSupply = revenueToken.finalSupply();
-        if (tokenFinalSupply != config.finalSupply) {
-            revert TokenFinalSupplyMismatch(config.finalSupply, tokenFinalSupply);
-        }
-
-        address tokenEligibility = address(revenueToken.eligibilityPolicy());
-        if (tokenEligibility != config.investorEligibility) {
-            revert TokenEligibilityMismatch(config.investorEligibility, tokenEligibility);
-        }
-
-        if (!revenueToken.hasRole(revenueToken.TOKEN_CONTROLLER_ROLE(), address(this))) {
-            revert OfferingManagerNotTokenController(config.revenueToken);
-        }
-
-        LicenseRevenueToken.Lifecycle lifecycle = revenueToken.lifecycle();
-        if (lifecycle != LicenseRevenueToken.Lifecycle.Created) {
-            revert TokenNotReadyForMinting(uint8(lifecycle));
-        }
-
-        uint256 actualSupply = revenueToken.totalSupply();
-        if (actualSupply != 0) revert InitialTokenSupplyNotZero(actualSupply);
-
-        uint256 escrowBalance = revenueToken.balanceOf(config.allocationEscrow);
-        if (escrowBalance != 0) revert InitialEscrowBalanceNotZero(escrowBalance);
-
-        address boundVault = address(revenueToken.revenueVault());
-        if (boundVault != address(0) && boundVault != config.revenueVault) {
-            revert TokenVaultMismatch(config.revenueVault, boundVault);
-        }
-        _validateRevenueVaultBundle(config.revenueVault);
-
-        address boundRecoveryManager = address(revenueToken.recoveryManager());
-        if (boundRecoveryManager != address(0) && boundRecoveryManager != config.recoveryManager) {
-            revert TokenRecoveryManagerMismatch(config.recoveryManager, boundRecoveryManager);
-        }
-        address boundDistributionEscrow = revenueToken.primaryDistributionEscrow();
-        if (boundDistributionEscrow != address(0) && boundDistributionEscrow != config.allocationEscrow) {
-            revert TokenDistributionEscrowMismatch(config.allocationEscrow, boundDistributionEscrow);
-        }
-
-        _validateAllocationEscrowBundle(offeringId, config);
-        _validateOfferingEscrowBundle(offeringId, config);
-    }
-
-    function _validateRevenueVaultBundle(address revenueVault) private view {
-        IRevenueVault configuredVault = IRevenueVault(revenueVault);
-        address vaultController = configuredVault.activationController();
-        if (vaultController != address(this)) {
-            revert VaultActivationControllerMismatch(address(this), vaultController);
-        }
-        IRevenueVault.DepositLifecycle vaultLifecycle = configuredVault.depositLifecycle();
-        if (vaultLifecycle != IRevenueVault.DepositLifecycle.Disabled) {
-            revert VaultDepositLifecycleMismatch(IRevenueVault.DepositLifecycle.Disabled, vaultLifecycle);
-        }
-    }
-
-    function _validateAllocationEscrowBundle(bytes32 offeringId, OfferingConfig storage config) private view {
-        IAllocationEscrow allocationEscrow = IAllocationEscrow(config.allocationEscrow);
-        address escrowManager = allocationEscrow.offeringManager();
-        if (escrowManager != address(this)) {
-            revert EscrowManagerMismatch(address(this), escrowManager);
-        }
-
-        bytes32 escrowOfferingId = allocationEscrow.offeringId();
-        if (escrowOfferingId != offeringId) {
-            revert EscrowOfferingMismatch(offeringId, escrowOfferingId);
-        }
-
-        address escrowToken = allocationEscrow.revenueToken();
-        if (escrowToken != config.revenueToken) {
-            revert EscrowTokenMismatch(config.revenueToken, escrowToken);
-        }
-
-        uint256 escrowFinalSupply = allocationEscrow.finalSupply();
-        if (escrowFinalSupply != config.finalSupply) {
-            revert EscrowFinalSupplyMismatch(config.finalSupply, escrowFinalSupply);
-        }
-    }
-
-    function _validateOfferingEscrowBundle(bytes32 offeringId, OfferingConfig storage config) private view {
-        IOfferingEscrow offeringEscrow = IOfferingEscrow(config.offeringEscrow);
-        address escrowOfferingManager = offeringEscrow.offeringManager();
-        if (escrowOfferingManager != address(this)) {
-            revert OfferingEscrowManagerMismatch(address(this), escrowOfferingManager);
-        }
-        bytes32 paymentEscrowOfferingId = offeringEscrow.offeringId();
-        if (paymentEscrowOfferingId != offeringId) {
-            revert OfferingEscrowOfferingMismatch(offeringId, paymentEscrowOfferingId);
-        }
-        address escrowSettlement = offeringEscrow.settlementToken();
-        if (escrowSettlement != config.settlementToken) {
-            revert OfferingEscrowSettlementMismatch(config.settlementToken, escrowSettlement);
-        }
-        address escrowTreasury = offeringEscrow.issuerTreasury();
-        if (escrowTreasury != config.issuerTreasury) {
-            revert OfferingEscrowTreasuryMismatch(config.issuerTreasury, escrowTreasury);
-        }
-        address escrowFeeRecipient = offeringEscrow.feeRecipient();
-        if (escrowFeeRecipient != config.feeRecipient) {
-            revert OfferingEscrowFeeRecipientMismatch(config.feeRecipient, escrowFeeRecipient);
-        }
-        uint16 escrowFee = offeringEscrow.protocolFeeBps();
-        if (escrowFee != config.protocolFeeBps) {
-            revert OfferingEscrowFeeMismatch(config.protocolFeeBps, escrowFee);
-        }
-    }
-
     function _validateCreationAuthority(uint256 assetId, address caller) private view {
         if (!assetRegistry.exists(assetId)) revert AssetDoesNotExist(assetId);
         address currentOwner = assetRegistry.ownerOf(assetId);
@@ -992,23 +847,6 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
 
         uint256 ownerRole = identityRegistry.ROLE_ASSET_OWNER();
         if (!identityRegistry.hasBusinessRole(caller, ownerRole)) revert AssetOwnerIdentityInvalid(caller);
-    }
-
-    function _validateRevenueProgramBinding(bytes32 offeringId, OfferingConfig calldata config) private view {
-        IRevenueProgramRegistry.RevenueProgram memory program = revenueProgramRegistry.getProgram(offeringId);
-        if (program.status != IRevenueProgramRegistry.ProgramStatus.Reserved) {
-            revert RevenueProgramStateMismatch(
-                offeringId, IRevenueProgramRegistry.ProgramStatus.Reserved, program.status
-            );
-        }
-        if (
-            program.offeringId != offeringId || program.assetId != config.assetId || program.issuer != config.issuer
-                || program.revenueToken != config.revenueToken || program.revenueVault != config.revenueVault
-                || program.settlementToken != config.settlementToken
-                || revenueProgramRegistry.liveOfferingByAsset(config.assetId) != offeringId
-        ) {
-            revert RevenueProgramBindingMismatch(offeringId);
-        }
     }
 
     function _failRevenueProgram(bytes32 offeringId, uint256 assetId) private {
@@ -1020,104 +858,6 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         if (revenueProgramRegistry.liveOfferingByAsset(assetId) != bytes32(0)) {
             revert RevenueProgramBindingMismatch(offeringId);
         }
-    }
-
-    function _validateFinalizationPostconditions(
-        bytes32 offeringId,
-        Offering storage offering,
-        LicenseRevenueToken revenueToken,
-        IRevenueVault revenueVault,
-        IOfferingEscrow offeringEscrow
-    ) private view {
-        OfferingConfig storage config = offering.config;
-        if (revenueToken.lifecycle() != LicenseRevenueToken.Lifecycle.Activated) {
-            revert FinalizationTokenLifecycleMismatch(revenueToken.lifecycle());
-        }
-
-        IRevenueProgramRegistry.RevenueProgram memory program = revenueProgramRegistry.getProgram(offeringId);
-        if (
-            program.status != IRevenueProgramRegistry.ProgramStatus.Active
-                || revenueProgramRegistry.activeOfferingByAsset(config.assetId) != offeringId
-                || program.assetId != config.assetId || program.issuer != config.issuer
-                || program.revenueToken != config.revenueToken || program.revenueVault != config.revenueVault
-                || program.settlementToken != config.settlementToken
-        ) {
-            revert FinalizationProgramMismatch(offeringId);
-        }
-
-        if (revenueVault.depositLifecycle() != IRevenueVault.DepositLifecycle.Enabled) {
-            revert VaultDepositLifecycleMismatch(
-                IRevenueVault.DepositLifecycle.Enabled, revenueVault.depositLifecycle()
-            );
-        }
-
-        uint256 contributed = offeringEscrow.totalContributed();
-        uint256 issuerAmount = offeringEscrow.issuerProceeds();
-        uint256 feeAmount = offeringEscrow.protocolFee();
-        if (
-            !offeringEscrow.proceedsEnabled() || offeringEscrow.refundable() || offeringEscrow.totalRefunded() != 0
-                || issuerAmount + feeAmount != contributed
-        ) {
-            revert FinalizationProceedsMismatch(contributed, issuerAmount, feeAmount);
-        }
-
-        uint256 tokenBalance = revenueToken.balanceOf(address(this));
-        if (tokenBalance != 0) {
-            revert FinalizationManagerAssetBalanceNotZero(config.revenueToken, tokenBalance);
-        }
-    }
-
-    function _validateConfig(OfferingConfig calldata config) private view {
-        if (!issuerEligibility.isEligibleIssuer(config.issuer)) revert InvalidIssuer(config.issuer);
-        if (
-            config.issuerTreasury == address(0) || config.revenueToken == address(0)
-                || config.revenueVault == address(0) || config.allocationEscrow == address(0)
-                || config.offeringEscrow == address(0) || config.investorEligibility == address(0)
-                || config.recoveryManager == address(0) || config.settlementToken == address(0)
-        ) revert ZeroConfigurationAddress();
-        if (config.feeRecipient == address(0)) revert ZeroFeeRecipient();
-
-        _validateDependencyContracts(config);
-
-        if (config.finalSupply == 0) revert InvalidFinalSupply();
-        if (config.allocationLot == 0 || config.finalSupply % config.allocationLot != 0) {
-            revert InvalidAllocationLot(config.allocationLot, config.finalSupply);
-        }
-        if (config.pricePerWholeTokenUSDC == 0) revert InvalidTokenPrice();
-        if (config.protocolFeeBps > MAX_BPS) revert InvalidProtocolFee(config.protocolFeeBps);
-        if (config.opensAt <= block.timestamp || config.closesAt <= config.opensAt) {
-            revert InvalidOfferingWindow(config.opensAt, config.closesAt);
-        }
-        if (config.termsHash == bytes32(0)) revert ZeroTermsHash();
-        if (config.disclosureHash == bytes32(0)) revert ZeroDisclosureHash();
-
-        uint8 decimals = IERC20Metadata(config.settlementToken).decimals();
-        if (decimals != REQUIRED_USDC_DECIMALS) {
-            revert UnsupportedSettlementDecimals(decimals, REQUIRED_USDC_DECIMALS);
-        }
-        if (mulmod(config.finalSupply, config.pricePerWholeTokenUSDC, TOKEN_UNIT) != 0) {
-            revert InexactTargetUSDC(config.finalSupply, config.pricePerWholeTokenUSDC);
-        }
-    }
-
-    function _validateDependencyContracts(OfferingConfig calldata config) private view {
-        _requireContract(config.revenueToken);
-        _requireContract(config.revenueVault);
-        _requireContract(config.allocationEscrow);
-        _requireContract(config.offeringEscrow);
-        _requireContract(config.investorEligibility);
-        _requireContract(config.recoveryManager);
-        _requireContract(config.settlementToken);
-    }
-
-    function _validateDependencyContracts(OfferingConfig storage config) private view {
-        _requireContract(config.revenueToken);
-        _requireContract(config.revenueVault);
-        _requireContract(config.allocationEscrow);
-        _requireContract(config.offeringEscrow);
-        _requireContract(config.investorEligibility);
-        _requireContract(config.recoveryManager);
-        _requireContract(config.settlementToken);
     }
 
     function _requireContract(address account) private view {
