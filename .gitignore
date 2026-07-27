@@ -20,3 +20,9 @@ build/
 
 # Hand-off
 docs/HANDOFF.md 
+
+# .github
+.github/copilot-instructions.md
+.github/instructions/
+
+

@@ -15,4 +15,16 @@ interface IAllocationEscrow {
     function depositConfirmed() external view returns (bool);
 
     function confirmTokenDeposit() external;
+
+    function totalAllocated() external view returns (uint256);
+
+    function totalReleased() external view returns (uint256);
+
+    function registerAllocation(
+        bytes32 subscriptionId,
+        bytes32 investorCommitment,
+        address destination,
+        uint256 amount,
+        uint64 sequence
+    ) external;
 }

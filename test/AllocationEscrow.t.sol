@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+import {AllocationEscrow} from "../contracts/AllocationEscrow.sol";
+
+contract AllocationEscrowTest is Test {
+    uint256 private constant FINAL_SUPPLY = 10_000 ether;
+    bytes32 private constant OFFERING_ID = keccak256("offering");
+
+    AllocationManagerMock private manager;
+    AllocationTokenMock private token;
+    AllocationEscrow private escrow;
+
+    address private outsider = makeAddr("outsider");
+    address private investor = makeAddr("investor");
+
+    event TokenDepositConfirmed(bytes32 indexed offeringId, address indexed revenueToken, uint256 finalSupply);
+
+    function setUp() public {
+        manager = new AllocationManagerMock();
+        token = new AllocationTokenMock(FINAL_SUPPLY);
+        escrow = new AllocationEscrow(address(manager), OFFERING_ID, address(token), FINAL_SUPPLY);
+        manager.setOfferingStatus(OFFERING_ID, 1);
+    }
+
+    function testImmutableOneToOneBindings() public view {
+        assertEq(escrow.offeringManager(), address(manager));
+        assertEq(escrow.offeringId(), OFFERING_ID);
+        assertEq(escrow.revenueToken(), address(token));
+        assertEq(escrow.finalSupply(), FINAL_SUPPLY);
+    }
+
+    function testExactDepositConfirmation() public {
+        token.mint(address(escrow), FINAL_SUPPLY);
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit TokenDepositConfirmed(OFFERING_ID, address(token), FINAL_SUPPLY);
+        manager.confirmDeposit(escrow);
+
+        assertTrue(escrow.depositConfirmed());
+        assertEq(token.balanceOf(address(escrow)), FINAL_SUPPLY);
+    }
+
+    function testUnauthorizedConfirmationRejected() public {
+        token.mint(address(escrow), FINAL_SUPPLY);
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.UnauthorizedOfferingManager.selector, outsider));
+        escrow.confirmTokenDeposit();
+
+        assertFalse(escrow.depositConfirmed());
+    }
+
+    function testRepeatedConfirmationRejected() public {
+        token.mint(address(escrow), FINAL_SUPPLY);
+        manager.confirmDeposit(escrow);
+
+        vm.expectRevert(AllocationEscrow.DepositAlreadyConfirmed.selector);
+        manager.confirmDeposit(escrow);
+
+        assertTrue(escrow.depositConfirmed());
+    }
+
+    function testIncorrectBalanceRejected() public {
+        token.mint(address(escrow), FINAL_SUPPLY - 1);
+        token.mint(address(this), 1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AllocationEscrow.IncorrectTokenBalance.selector, FINAL_SUPPLY, FINAL_SUPPLY - 1)
+        );
+        manager.confirmDeposit(escrow);
+
+        assertFalse(escrow.depositConfirmed());
+    }
+
+    function testWrongTokenSupplyBindingRejected() public {
+        AllocationTokenMock wrongSupplyToken = new AllocationTokenMock(FINAL_SUPPLY + 1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AllocationEscrow.TokenFinalSupplyMismatch.selector, FINAL_SUPPLY, FINAL_SUPPLY + 1)
+        );
+        new AllocationEscrow(address(manager), OFFERING_ID, address(wrongSupplyToken), FINAL_SUPPLY);
+    }
+
+    function testAllocationRecordIsImmutableAndCapped() public {
+        token.mint(address(escrow), FINAL_SUPPLY);
+        manager.confirmDeposit(escrow);
+        manager.setOfferingStatus(OFFERING_ID, 2);
+
+        bytes32 subscriptionId = keccak256("subscription-1");
+        bytes32 investorCommitment = keccak256("investor-commitment");
+        manager.registerAllocation(escrow, subscriptionId, investorCommitment, investor, 6_000 ether, 0);
+
+        AllocationEscrow.Allocation memory allocation = escrow.getAllocation(subscriptionId);
+        assertEq(allocation.investorCommitment, investorCommitment);
+        assertEq(allocation.destination, investor);
+        assertEq(allocation.amount, 6_000 ether);
+        assertEq(allocation.sequence, 0);
+        assertTrue(allocation.exists);
+        assertEq(escrow.totalAllocated(), 6_000 ether);
+        assertEq(escrow.totalReleased(), 0);
+
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.AllocationAlreadyExists.selector, subscriptionId));
+        manager.registerAllocation(escrow, subscriptionId, keccak256("replacement"), outsider, 1 ether, 1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AllocationEscrow.AllocationExceedsFinalSupply.selector, 11_000 ether, FINAL_SUPPLY)
+        );
+        manager.registerAllocation(
+            escrow, keccak256("subscription-2"), keccak256("investor-2"), outsider, 5_000 ether, 1
+        );
+
+        assertEq(escrow.totalAllocated(), 6_000 ether);
+        assertEq(escrow.totalReleased(), 0);
+    }
+
+    function testAllocationCannotRegisterBeforeOfferingOpen() public {
+        token.mint(address(escrow), FINAL_SUPPLY);
+        manager.confirmDeposit(escrow);
+
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.InvalidOfferingStatus.selector, uint8(2), uint8(1)));
+        manager.registerAllocation(escrow, keccak256("subscription"), keccak256("investor"), investor, 1 ether, 0);
+    }
+
+    function testNoArbitraryWithdrawalOrTokenTransfer() public {
+        token.mint(address(escrow), FINAL_SUPPLY);
+        manager.confirmDeposit(escrow);
+
+        (bool withdrawSuccess,) =
+            address(escrow).call(abi.encodeWithSignature("withdraw(address,uint256)", outsider, FINAL_SUPPLY));
+        (bool rescueSuccess,) = address(escrow)
+            .call(abi.encodeWithSignature("rescue(address,address,uint256)", address(token), outsider, FINAL_SUPPLY));
+        (bool transferSuccess,) = address(escrow)
+            .call(
+                abi.encodeWithSignature(
+                    "transferToken(address,address,uint256)", address(token), outsider, FINAL_SUPPLY
+                )
+            );
+
+        assertFalse(withdrawSuccess);
+        assertFalse(rescueSuccess);
+        assertFalse(transferSuccess);
+        assertEq(token.balanceOf(address(escrow)), FINAL_SUPPLY);
+        assertEq(token.balanceOf(outsider), 0);
+    }
+}
+
+contract AllocationManagerMock {
+    mapping(bytes32 offeringId => uint8 status) private _statuses;
+
+    function setOfferingStatus(bytes32 offeringId, uint8 status) external {
+        _statuses[offeringId] = status;
+    }
+
+    function getOfferingStatus(bytes32 offeringId) external view returns (uint8) {
+        return _statuses[offeringId];
+    }
+
+    function confirmDeposit(AllocationEscrow escrow) external {
+        escrow.confirmTokenDeposit();
+    }
+
+    function registerAllocation(
+        AllocationEscrow escrow,
+        bytes32 subscriptionId,
+        bytes32 investorCommitment,
+        address destination,
+        uint256 amount,
+        uint64 sequence
+    ) external {
+        escrow.registerAllocation(subscriptionId, investorCommitment, destination, amount, sequence);
+    }
+}
+
+contract AllocationTokenMock is ERC20 {
+    uint256 public immutable finalSupply;
+
+    constructor(uint256 finalSupply_) ERC20("Allocation Token", "ALLOC") {
+        finalSupply = finalSupply_;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}

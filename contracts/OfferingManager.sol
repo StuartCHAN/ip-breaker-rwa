@@ -4,11 +4,14 @@ pragma solidity ^0.8.24;
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {LicenseRevenueToken} from "./LicenseRevenueToken.sol";
 import {IAllocationEscrow} from "./interfaces/IAllocationEscrow.sol";
 import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
+import {IInvestorEligibility} from "./interfaces/IInvestorEligibility.sol";
 import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
+import {IOfferingEscrow} from "./interfaces/IOfferingEscrow.sol";
 
 /// @notice Issuer/SPV verification boundary; deliberately separate from investor and asset-owner roles.
 interface IIssuerEligibility {
@@ -18,7 +21,7 @@ interface IIssuerEligibility {
 /// @title OfferingManager
 /// @notice Non-custodial core state machine for immutable primary-offering configuration.
 /// @dev Phase 3.2-2B atomically prepares and escrows the frozen token supply when opening.
-contract OfferingManager is AccessControl {
+contract OfferingManager is AccessControl, ReentrancyGuard {
     enum OfferingStatus {
         None,
         Draft,
@@ -40,8 +43,10 @@ contract OfferingManager is AccessControl {
         address recoveryManager;
         address settlementToken;
         uint256 finalSupply;
+        uint256 allocationLot;
         uint256 pricePerWholeTokenUSDC;
         uint16 protocolFeeBps;
+        address feeRecipient;
         uint64 opensAt;
         uint64 closesAt;
         bytes32 termsHash;
@@ -55,7 +60,22 @@ contract OfferingManager is AccessControl {
         uint64 createdAt;
         uint64 openedAt;
         uint256 targetUSDC;
+        uint256 soldSupply;
+        uint256 committedUSDC;
+        uint64 nextSequence;
         OfferingConfig config;
+    }
+
+    struct Subscription {
+        bytes32 subscriptionId;
+        bytes32 paymentReference;
+        address payer;
+        address destination;
+        uint256 requestedAllocation;
+        uint256 filledAllocation;
+        uint256 usdcAmount;
+        uint64 sequence;
+        uint64 subscribedAt;
     }
 
     bytes32 public constant OFFERING_OPERATOR_ROLE = keccak256("OFFERING_OPERATOR");
@@ -69,6 +89,8 @@ contract OfferingManager is AccessControl {
 
     mapping(bytes32 offeringId => Offering offering) private _offerings;
     mapping(address creator => uint256 nonce) public creatorNonce;
+    mapping(bytes32 subscriptionId => Subscription subscription) private _subscriptions;
+    mapping(bytes32 offeringId => mapping(bytes32 paymentReference => bool used)) public paymentReferenceUsed;
 
     error ZeroAdmin();
     error ZeroIdentityRegistry();
@@ -111,6 +133,29 @@ contract OfferingManager is AccessControl {
     error EscrowOfferingMismatch(bytes32 expected, bytes32 actual);
     error EscrowTokenMismatch(address expected, address actual);
     error EscrowFinalSupplyMismatch(uint256 expected, uint256 actual);
+    error InvalidAllocationLot(uint256 allocationLot, uint256 finalSupply);
+    error ZeroFeeRecipient();
+    error OfferingEscrowManagerMismatch(address expected, address actual);
+    error OfferingEscrowOfferingMismatch(bytes32 expected, bytes32 actual);
+    error OfferingEscrowSettlementMismatch(address expected, address actual);
+    error OfferingEscrowTreasuryMismatch(address expected, address actual);
+    error OfferingEscrowFeeRecipientMismatch(address expected, address actual);
+    error OfferingEscrowFeeMismatch(uint16 expected, uint16 actual);
+    error SubscriptionWindowClosed(uint256 currentTime, uint64 closesAt);
+    error InvalidSubscriberIdentity(address payer);
+    error IneligibleSubscriber(address payer);
+    error IneligibleDestination(address destination);
+    error ZeroRequestedAllocation();
+    error InvalidMinFill(uint256 minFill, uint256 requestedAllocation);
+    error OfferingSoldOut(bytes32 offeringId);
+    error FillBelowMinimum(uint256 filledAllocation, uint256 minFill);
+    error FillNotAlignedToLot(uint256 filledAllocation, uint256 allocationLot);
+    error InexactSubscriptionPrice(uint256 filledAllocation, uint256 price);
+    error ZeroPaymentReference();
+    error PaymentReferenceAlreadyUsed(bytes32 offeringId, bytes32 paymentReference);
+    error SubscriptionAlreadyExists(bytes32 subscriptionId);
+    error AllocationAccountingMismatch(uint256 expected, uint256 actual);
+    error ContributionAccountingMismatch(uint256 expected, uint256 actual);
 
     event OfferingCreated(
         bytes32 indexed offeringId,
@@ -126,6 +171,17 @@ contract OfferingManager is AccessControl {
     event OfferingOpened(bytes32 indexed offeringId, address indexed operator, uint64 openedAt);
     event OfferingStatusChanged(
         bytes32 indexed offeringId, OfferingStatus indexed previousStatus, OfferingStatus indexed newStatus
+    );
+    event SubscriptionAccepted(
+        bytes32 indexed offeringId,
+        bytes32 indexed subscriptionId,
+        address indexed payer,
+        address destination,
+        uint256 requestedAllocation,
+        uint256 filledAllocation,
+        uint256 usdcAmount,
+        bytes32 paymentReference,
+        uint64 sequence
     );
 
     constructor(address admin_, address identityRegistry_, address assetRegistry_, address issuerEligibility_) {
@@ -229,6 +285,150 @@ contract OfferingManager is AccessControl {
         return status;
     }
 
+    /// @notice Atomically records an FCFS allocation and pulls its exact USDC cost.
+    function subscribe(
+        bytes32 offeringId,
+        uint256 requestedAllocation,
+        uint256 minFill,
+        address destination,
+        bytes32 paymentReference
+    ) external nonReentrant returns (bytes32 subscriptionId, uint256 filledAllocation, uint256 requiredUSDC) {
+        Offering storage offering = _getOffering(offeringId);
+        _requireStatus(offeringId, offering.status, OfferingStatus.Open);
+
+        OfferingConfig storage config = offering.config;
+        if (block.timestamp >= config.closesAt) {
+            revert SubscriptionWindowClosed(block.timestamp, config.closesAt);
+        }
+        if (requestedAllocation == 0) revert ZeroRequestedAllocation();
+        if (minFill > requestedAllocation) {
+            revert InvalidMinFill(minFill, requestedAllocation);
+        }
+        if (destination == address(0)) revert IneligibleDestination(destination);
+        if (paymentReference == bytes32(0)) revert ZeroPaymentReference();
+        if (paymentReferenceUsed[offeringId][paymentReference]) {
+            revert PaymentReferenceAlreadyUsed(offeringId, paymentReference);
+        }
+
+        uint256 licenseeRole = identityRegistry.ROLE_LICENSEE();
+        if (!identityRegistry.hasBusinessRole(msg.sender, licenseeRole)) {
+            revert InvalidSubscriberIdentity(msg.sender);
+        }
+        IInvestorEligibility eligibility = IInvestorEligibility(config.investorEligibility);
+        if (!eligibility.canHold(msg.sender, config.assetId)) {
+            revert IneligibleSubscriber(msg.sender);
+        }
+        if (!eligibility.canHold(destination, config.assetId)) {
+            revert IneligibleDestination(destination);
+        }
+
+        uint256 remainingSupply = config.finalSupply - offering.soldSupply;
+        if (remainingSupply == 0) revert OfferingSoldOut(offeringId);
+        filledAllocation = requestedAllocation < remainingSupply ? requestedAllocation : remainingSupply;
+        if (filledAllocation < minFill) {
+            revert FillBelowMinimum(filledAllocation, minFill);
+        }
+        if (filledAllocation % config.allocationLot != 0) {
+            revert FillNotAlignedToLot(filledAllocation, config.allocationLot);
+        }
+        if (mulmod(filledAllocation, config.pricePerWholeTokenUSDC, TOKEN_UNIT) != 0) {
+            revert InexactSubscriptionPrice(filledAllocation, config.pricePerWholeTokenUSDC);
+        }
+        requiredUSDC = Math.mulDiv(filledAllocation, config.pricePerWholeTokenUSDC, TOKEN_UNIT);
+
+        uint64 sequence = offering.nextSequence;
+        subscriptionId = _deriveSubscriptionId(offeringId, msg.sender, destination, paymentReference, sequence);
+        if (_subscriptions[subscriptionId].subscriptionId != bytes32(0)) {
+            revert SubscriptionAlreadyExists(subscriptionId);
+        }
+
+        Subscription memory acceptedSubscription = Subscription({
+            subscriptionId: subscriptionId,
+            paymentReference: paymentReference,
+            payer: msg.sender,
+            destination: destination,
+            requestedAllocation: requestedAllocation,
+            filledAllocation: filledAllocation,
+            usdcAmount: requiredUSDC,
+            sequence: sequence,
+            subscribedAt: uint64(block.timestamp)
+        });
+        _recordSubscriptionEscrows(config, acceptedSubscription);
+        _commitSubscription(offeringId, offering, acceptedSubscription);
+    }
+
+    function getSubscription(bytes32 subscriptionId) external view returns (Subscription memory) {
+        return _subscriptions[subscriptionId];
+    }
+
+    function _emitSubscriptionAccepted(bytes32 offeringId, Subscription storage subscription) private {
+        emit SubscriptionAccepted(
+            offeringId,
+            subscription.subscriptionId,
+            subscription.payer,
+            subscription.destination,
+            subscription.requestedAllocation,
+            subscription.filledAllocation,
+            subscription.usdcAmount,
+            subscription.paymentReference,
+            subscription.sequence
+        );
+    }
+
+    function _deriveSubscriptionId(
+        bytes32 offeringId,
+        address payer,
+        address destination,
+        bytes32 paymentReference,
+        uint64 sequence
+    ) private view returns (bytes32) {
+        return keccak256(
+            abi.encode(block.chainid, address(this), offeringId, payer, destination, paymentReference, sequence)
+        );
+    }
+
+    function _recordSubscriptionEscrows(OfferingConfig storage config, Subscription memory subscription) private {
+        IOfferingEscrow(config.offeringEscrow)
+            .recordContribution(
+                subscription.subscriptionId,
+                subscription.payer,
+                subscription.destination,
+                subscription.usdcAmount,
+                subscription.filledAllocation,
+                subscription.paymentReference,
+                subscription.sequence
+            );
+        IAllocationEscrow(config.allocationEscrow)
+            .registerAllocation(
+                subscription.subscriptionId,
+                keccak256(abi.encode(subscription.payer, subscription.destination, subscription.paymentReference)),
+                subscription.destination,
+                subscription.filledAllocation,
+                subscription.sequence
+            );
+    }
+
+    function _commitSubscription(bytes32 offeringId, Offering storage offering, Subscription memory subscription)
+        private
+    {
+        _subscriptions[subscription.subscriptionId] = subscription;
+        paymentReferenceUsed[offeringId][subscription.paymentReference] = true;
+        offering.soldSupply += subscription.filledAllocation;
+        offering.committedUSDC += subscription.usdcAmount;
+        offering.nextSequence = subscription.sequence + 1;
+
+        uint256 escrowAllocated = IAllocationEscrow(offering.config.allocationEscrow).totalAllocated();
+        if (escrowAllocated != offering.soldSupply) {
+            revert AllocationAccountingMismatch(offering.soldSupply, escrowAllocated);
+        }
+        uint256 escrowContributed = IOfferingEscrow(offering.config.offeringEscrow).totalContributed();
+        if (escrowContributed != offering.committedUSDC) {
+            revert ContributionAccountingMismatch(offering.committedUSDC, escrowContributed);
+        }
+
+        _emitSubscriptionAccepted(offeringId, _subscriptions[subscription.subscriptionId]);
+    }
+
     function _prepareTokenCustody(bytes32 offeringId, OfferingConfig storage config) private {
         LicenseRevenueToken revenueToken = LicenseRevenueToken(config.revenueToken);
         _validateTokenBundle(offeringId, revenueToken, config);
@@ -315,6 +515,11 @@ contract OfferingManager is AccessControl {
             revert TokenRecoveryManagerMismatch(config.recoveryManager, boundRecoveryManager);
         }
 
+        _validateAllocationEscrowBundle(offeringId, config);
+        _validateOfferingEscrowBundle(offeringId, config);
+    }
+
+    function _validateAllocationEscrowBundle(bytes32 offeringId, OfferingConfig storage config) private view {
         IAllocationEscrow allocationEscrow = IAllocationEscrow(config.allocationEscrow);
         address escrowManager = allocationEscrow.offeringManager();
         if (escrowManager != address(this)) {
@@ -337,6 +542,34 @@ contract OfferingManager is AccessControl {
         }
     }
 
+    function _validateOfferingEscrowBundle(bytes32 offeringId, OfferingConfig storage config) private view {
+        IOfferingEscrow offeringEscrow = IOfferingEscrow(config.offeringEscrow);
+        address escrowOfferingManager = offeringEscrow.offeringManager();
+        if (escrowOfferingManager != address(this)) {
+            revert OfferingEscrowManagerMismatch(address(this), escrowOfferingManager);
+        }
+        bytes32 paymentEscrowOfferingId = offeringEscrow.offeringId();
+        if (paymentEscrowOfferingId != offeringId) {
+            revert OfferingEscrowOfferingMismatch(offeringId, paymentEscrowOfferingId);
+        }
+        address escrowSettlement = offeringEscrow.settlementToken();
+        if (escrowSettlement != config.settlementToken) {
+            revert OfferingEscrowSettlementMismatch(config.settlementToken, escrowSettlement);
+        }
+        address escrowTreasury = offeringEscrow.issuerTreasury();
+        if (escrowTreasury != config.issuerTreasury) {
+            revert OfferingEscrowTreasuryMismatch(config.issuerTreasury, escrowTreasury);
+        }
+        address escrowFeeRecipient = offeringEscrow.feeRecipient();
+        if (escrowFeeRecipient != config.feeRecipient) {
+            revert OfferingEscrowFeeRecipientMismatch(config.feeRecipient, escrowFeeRecipient);
+        }
+        uint16 escrowFee = offeringEscrow.protocolFeeBps();
+        if (escrowFee != config.protocolFeeBps) {
+            revert OfferingEscrowFeeMismatch(config.protocolFeeBps, escrowFee);
+        }
+    }
+
     function _validateCreationAuthority(uint256 assetId, address caller) private view {
         if (!assetRegistry.exists(assetId)) revert AssetDoesNotExist(assetId);
         address currentOwner = assetRegistry.ownerOf(assetId);
@@ -354,10 +587,14 @@ contract OfferingManager is AccessControl {
                 || config.offeringEscrow == address(0) || config.investorEligibility == address(0)
                 || config.recoveryManager == address(0) || config.settlementToken == address(0)
         ) revert ZeroConfigurationAddress();
+        if (config.feeRecipient == address(0)) revert ZeroFeeRecipient();
 
         _validateDependencyContracts(config);
 
         if (config.finalSupply == 0) revert InvalidFinalSupply();
+        if (config.allocationLot == 0 || config.finalSupply % config.allocationLot != 0) {
+            revert InvalidAllocationLot(config.allocationLot, config.finalSupply);
+        }
         if (config.pricePerWholeTokenUSDC == 0) revert InvalidTokenPrice();
         if (config.protocolFeeBps > MAX_BPS) revert InvalidProtocolFee(config.protocolFeeBps);
         if (config.opensAt <= block.timestamp || config.closesAt <= config.opensAt) {
