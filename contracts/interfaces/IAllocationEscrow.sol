@@ -20,6 +20,10 @@ interface IAllocationEscrow {
 
     function totalReleased() external view returns (uint256);
 
+    function tombstoned() external view returns (bool);
+
+    function tombstone() external;
+
     function registerAllocation(
         bytes32 subscriptionId,
         bytes32 investorCommitment,

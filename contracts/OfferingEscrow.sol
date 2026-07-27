@@ -23,6 +23,7 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
         uint64 sequence;
         uint64 recordedAt;
         bytes32 contributionHash;
+        bool refunded;
     }
 
     uint8 public constant REQUIRED_SETTLEMENT_DECIMALS = 6;
@@ -36,6 +37,8 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
     uint16 public immutable protocolFeeBps;
 
     uint256 public totalContributed;
+    uint256 public totalRefunded;
+    bool public refundable;
     mapping(bytes32 subscriptionId => Contribution contribution) private _contributions;
     mapping(bytes32 paymentReference => bool used) public paymentReferenceUsed;
 
@@ -56,6 +59,12 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
     error ContributionAlreadyExists(bytes32 subscriptionId);
     error PaymentReferenceAlreadyUsed(bytes32 paymentReference);
     error IncorrectSettlementDelta(uint256 expected, uint256 actual);
+    error RefundsAlreadyEnabled();
+    error RefundsNotEnabled();
+    error UnknownContribution(bytes32 subscriptionId);
+    error UnauthorizedRefundClaimant(address caller, address payer);
+    error RefundAlreadyClaimed(bytes32 subscriptionId);
+    error EscrowInsolvent(uint256 required, uint256 available);
 
     event ContributionRecorded(
         bytes32 indexed offeringId,
@@ -67,6 +76,10 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
         bytes32 paymentReference,
         uint64 sequence,
         bytes32 contributionHash
+    );
+    event RefundsEnabled(bytes32 indexed offeringId);
+    event RefundClaimed(
+        bytes32 indexed offeringId, bytes32 indexed subscriptionId, address indexed payer, uint256 amount
     );
 
     modifier onlyOfferingManager() {
@@ -114,6 +127,7 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
         bytes32 paymentReference,
         uint64 sequence
     ) external onlyOfferingManager nonReentrant {
+        if (refundable) revert RefundsAlreadyEnabled();
         if (subscriptionId == bytes32(0)) revert ZeroSubscriptionId();
         if (payer == address(0)) revert ZeroPayer();
         if (destination == address(0)) revert ZeroDestination();
@@ -159,7 +173,8 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
             paymentReference: paymentReference,
             sequence: sequence,
             recordedAt: uint64(block.timestamp),
-            contributionHash: recordHash
+            contributionHash: recordHash,
+            refunded: false
         });
         paymentReferenceUsed[paymentReference] = true;
         totalContributed += usdcAmount;
@@ -175,6 +190,36 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
             sequence,
             recordHash
         );
+    }
+
+    function markRefundable() external onlyOfferingManager {
+        if (refundable) revert RefundsAlreadyEnabled();
+        refundable = true;
+        emit RefundsEnabled(offeringId);
+    }
+
+    function claimRefund(bytes32 subscriptionId) external nonReentrant {
+        if (!refundable) revert RefundsNotEnabled();
+        Contribution storage contribution = _contributions[subscriptionId];
+        if (contribution.subscriptionId == bytes32(0)) {
+            revert UnknownContribution(subscriptionId);
+        }
+        if (msg.sender != contribution.payer) {
+            revert UnauthorizedRefundClaimant(msg.sender, contribution.payer);
+        }
+        if (contribution.refunded) revert RefundAlreadyClaimed(subscriptionId);
+
+        IERC20 token = IERC20(settlementToken);
+        uint256 available = token.balanceOf(address(this));
+        if (available < contribution.usdcAmount) {
+            revert EscrowInsolvent(contribution.usdcAmount, available);
+        }
+
+        contribution.refunded = true;
+        totalRefunded += contribution.usdcAmount;
+        token.safeTransfer(contribution.payer, contribution.usdcAmount);
+
+        emit RefundClaimed(offeringId, subscriptionId, contribution.payer, contribution.usdcAmount);
     }
 
     function getContribution(bytes32 subscriptionId) external view returns (Contribution memory) {

@@ -91,6 +91,60 @@ contract OfferingEscrowTest is Test {
         assertEq(usdc.balanceOf(address(escrow)), 500_000);
         assertEq(usdc.balanceOf(outsider), 0);
     }
+
+    function testFullRefundOnlyOriginalPayerAndOnlyOnce() public {
+        manager.record(escrow, SUBSCRIPTION_ID, payer, destination, 500_000, 500 ether, PAYMENT_REFERENCE, 0);
+        manager.enableRefunds(escrow);
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.UnauthorizedRefundClaimant.selector, outsider, payer));
+        escrow.claimRefund(SUBSCRIPTION_ID);
+
+        uint256 balanceBefore = usdc.balanceOf(payer);
+        vm.prank(payer);
+        escrow.claimRefund(SUBSCRIPTION_ID);
+        assertEq(usdc.balanceOf(payer), balanceBefore + 500_000);
+        assertEq(escrow.totalRefunded(), 500_000);
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+
+        vm.prank(payer);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.RefundAlreadyClaimed.selector, SUBSCRIPTION_ID));
+        escrow.claimRefund(SUBSCRIPTION_ID);
+    }
+
+    function testRefundBeforeFailedRejected() public {
+        manager.record(escrow, SUBSCRIPTION_ID, payer, destination, 500_000, 500 ether, PAYMENT_REFERENCE, 0);
+
+        vm.prank(payer);
+        vm.expectRevert(OfferingEscrow.RefundsNotEnabled.selector);
+        escrow.claimRefund(SUBSCRIPTION_ID);
+    }
+
+    function testRefundTransferFailureRollsBackAccounting() public {
+        manager.record(escrow, SUBSCRIPTION_ID, payer, destination, 500_000, 500 ether, PAYMENT_REFERENCE, 0);
+        manager.enableRefunds(escrow);
+        usdc.setTransferFailure(true);
+
+        vm.prank(payer);
+        vm.expectRevert(SixDecimalSettlementMock.TransferFailed.selector);
+        escrow.claimRefund(SUBSCRIPTION_ID);
+
+        OfferingEscrow.Contribution memory contribution = escrow.getContribution(SUBSCRIPTION_ID);
+        assertFalse(contribution.refunded);
+        assertEq(escrow.totalRefunded(), 0);
+        assertEq(usdc.balanceOf(address(escrow)), 500_000);
+    }
+
+    function testRefundGateOnlyManagerAndOneWay() public {
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.UnauthorizedOfferingManager.selector, outsider));
+        escrow.markRefundable();
+
+        manager.enableRefunds(escrow);
+        assertTrue(escrow.refundable());
+        vm.expectRevert(OfferingEscrow.RefundsAlreadyEnabled.selector);
+        manager.enableRefunds(escrow);
+    }
 }
 
 contract ContributionManagerMock {
@@ -108,9 +162,17 @@ contract ContributionManagerMock {
             subscriptionId, payer, destination, usdcAmount, allocationAmount, paymentReference, sequence
         );
     }
+
+    function enableRefunds(OfferingEscrow escrow) external {
+        escrow.markRefundable();
+    }
 }
 
 contract SixDecimalSettlementMock is ERC20 {
+    bool private _transferFailure;
+
+    error TransferFailed();
+
     constructor() ERC20("USDC", "USDC") {}
 
     function decimals() public pure override returns (uint8) {
@@ -119,6 +181,17 @@ contract SixDecimalSettlementMock is ERC20 {
 
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
+    }
+
+    function setTransferFailure(bool shouldFail) external {
+        _transferFailure = shouldFail;
+    }
+
+    function _update(address from, address to, uint256 value) internal virtual override {
+        if (_transferFailure && from != address(0) && to != address(0)) {
+            revert TransferFailed();
+        }
+        super._update(from, to, value);
     }
 }
 

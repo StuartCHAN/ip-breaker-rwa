@@ -448,7 +448,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     }
 
     /// @notice Resolves an empty or fully reconciled offering after Funding closes.
-    function resolveOfferingOutcome(bytes32 offeringId) external {
+    function resolveOfferingOutcome(bytes32 offeringId) external nonReentrant {
         Offering storage offering = _getOffering(offeringId);
         _requireStatus(offeringId, offering.status, OfferingStatus.Open);
         if (block.timestamp < offering.config.closesAt) {
@@ -503,6 +503,8 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
             emit OfferingSuccessful(offeringId, offering.validSoldSupply, offering.validCommittedUSDC);
         } else {
             offering.status = OfferingStatus.Failed;
+            IOfferingEscrow(offering.config.offeringEscrow).markRefundable();
+            IAllocationEscrow(offering.config.allocationEscrow).tombstone();
             emit OfferingStatusChanged(offeringId, OfferingStatus.Open, OfferingStatus.Failed);
             emit OfferingFailed(offeringId, offering.validSoldSupply, offering.validCommittedUSDC);
         }

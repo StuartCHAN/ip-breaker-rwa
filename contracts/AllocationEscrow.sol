@@ -37,6 +37,7 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
     uint256 public immutable finalSupply;
 
     bool public depositConfirmed;
+    bool public tombstoned;
     uint256 public totalAllocated;
     uint256 public totalReleased;
     uint64 public nextSequence;
@@ -63,6 +64,8 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
     error AllocationAlreadyExists(bytes32 subscriptionId);
     error InvalidAllocationSequence(uint64 expected, uint64 actual);
     error AllocationExceedsFinalSupply(uint256 requestedTotal, uint256 finalSupply);
+    error AlreadyTombstoned();
+    error EscrowTombstoned();
 
     event TokenDepositConfirmed(bytes32 indexed offeringId, address indexed revenueToken, uint256 finalSupply);
     event AllocationRegistered(
@@ -73,6 +76,9 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         uint64 sequence,
         bytes32 investorCommitment,
         bytes32 allocationHash
+    );
+    event AllocationEscrowTombstoned(
+        bytes32 indexed offeringId, address indexed revenueToken, uint256 remainingBalance
     );
 
     modifier onlyOfferingManager() {
@@ -135,6 +141,7 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         uint256 amount,
         uint64 sequence
     ) external onlyOfferingManager nonReentrant {
+        if (tombstoned) revert EscrowTombstoned();
         if (!depositConfirmed) revert DepositNotConfirmed();
 
         uint8 status = IOfferingManagerStatus(offeringManager).getOfferingStatus(offeringId);
@@ -184,6 +191,12 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         emit AllocationRegistered(
             offeringId, subscriptionId, destination, amount, sequence, investorCommitment, recordHash
         );
+    }
+
+    function tombstone() external onlyOfferingManager {
+        if (tombstoned) revert AlreadyTombstoned();
+        tombstoned = true;
+        emit AllocationEscrowTombstoned(offeringId, revenueToken, IERC20(revenueToken).balanceOf(address(this)));
     }
 
     function getAllocation(bytes32 subscriptionId) external view returns (Allocation memory) {

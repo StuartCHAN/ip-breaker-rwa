@@ -146,6 +146,29 @@ contract AllocationEscrowTest is Test {
         assertEq(token.balanceOf(address(escrow)), FINAL_SUPPLY);
         assertEq(token.balanceOf(outsider), 0);
     }
+
+    function testTombstoneIsPermanentAndBlocksFurtherAllocation() public {
+        token.mint(address(escrow), FINAL_SUPPLY);
+        manager.confirmDeposit(escrow);
+        manager.tombstone(escrow);
+
+        assertTrue(escrow.tombstoned());
+        assertEq(token.balanceOf(address(escrow)), FINAL_SUPPLY);
+        assertEq(escrow.totalReleased(), 0);
+
+        manager.setOfferingStatus(OFFERING_ID, 2);
+        vm.expectRevert(AllocationEscrow.EscrowTombstoned.selector);
+        manager.registerAllocation(escrow, keccak256("subscription"), keccak256("investor"), investor, 1 ether, 0);
+
+        vm.expectRevert(AllocationEscrow.AlreadyTombstoned.selector);
+        manager.tombstone(escrow);
+    }
+
+    function testUnauthorizedTombstoneRejected() public {
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.UnauthorizedOfferingManager.selector, outsider));
+        escrow.tombstone();
+    }
 }
 
 contract AllocationManagerMock {
@@ -172,6 +195,10 @@ contract AllocationManagerMock {
         uint64 sequence
     ) external {
         escrow.registerAllocation(subscriptionId, investorCommitment, destination, amount, sequence);
+    }
+
+    function tombstone(AllocationEscrow escrow) external {
+        escrow.tombstone();
     }
 }
 

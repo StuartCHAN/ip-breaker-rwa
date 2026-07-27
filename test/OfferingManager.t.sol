@@ -32,6 +32,8 @@ contract OfferingManagerTest is Test {
     address private feeRecipient = makeAddr("fee-recipient");
     address private investor = makeAddr("investor");
     address private destination = makeAddr("destination");
+    address private secondInvestor = makeAddr("second-investor");
+    address private secondDestination = makeAddr("second-destination");
 
     uint256 private constant ASSET_ID = 1;
     uint256 private constant FINAL_SUPPLY = 10_000 ether;
@@ -788,6 +790,11 @@ contract OfferingManagerTest is Test {
         assertEq(offering.validSoldSupply, 0);
         assertEq(offering.validCommittedUSDC, 0);
         assertEq(subscription.invalidReason, manager.INVALID_PAYER_IDENTITY());
+        assertTrue(offeringEscrow.refundable());
+        assertTrue(allocationEscrow.tombstoned());
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), FINAL_SUPPLY);
+        assertEq(allocationEscrow.totalReleased(), 0);
     }
 
     function testDestinationOrPayerEligibilityLossMakesSubscriptionInvalid() public {
@@ -869,6 +876,90 @@ contract OfferingManagerTest is Test {
         assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Failed));
         vm.expectRevert();
         manager.resolveOfferingOutcome(offeringId);
+    }
+
+    function testPayerCanClaimFullRefundAfterFailedOutcome() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        bytes32 subscriptionId = manager.subscriptionIdBySequence(offeringId, 0);
+        identityRegistry.setLicensee(investor, false);
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+
+        uint256 balanceBefore = usdc.balanceOf(investor);
+        vm.prank(investor);
+        offeringEscrow.claimRefund(subscriptionId);
+
+        assertEq(usdc.balanceOf(investor), balanceBefore + 10_000 * 1_000_000);
+        assertEq(offeringEscrow.totalRefunded(), 10_000 * 1_000_000);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), 0);
+        assertEq(usdc.balanceOf(address(manager)), 0);
+        assertTrue(offeringEscrow.getContribution(subscriptionId).refunded);
+    }
+
+    function testMultipleInvestorsRefundIndependentlyInAnyOrder() public {
+        bytes32 offeringId = _openOffering();
+        _prepareInvestor(investor, destination);
+        _prepareInvestor(secondInvestor, secondDestination);
+        vm.prank(investor);
+        manager.subscribe(offeringId, 4_000 ether, 0, destination, keccak256("refund-first"));
+        vm.prank(secondInvestor);
+        manager.subscribe(offeringId, 5_000 ether, 0, secondDestination, keccak256("refund-second"));
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        manager.reconcileSubscription(offeringId, 1);
+
+        bytes32 firstId = manager.subscriptionIdBySequence(offeringId, 0);
+        bytes32 secondId = manager.subscriptionIdBySequence(offeringId, 1);
+        uint256 firstBefore = usdc.balanceOf(investor);
+        uint256 secondBefore = usdc.balanceOf(secondInvestor);
+
+        vm.prank(secondInvestor);
+        offeringEscrow.claimRefund(secondId);
+        vm.prank(investor);
+        offeringEscrow.claimRefund(firstId);
+
+        assertEq(usdc.balanceOf(investor), firstBefore + 4_000 * 1_000_000);
+        assertEq(usdc.balanceOf(secondInvestor), secondBefore + 5_000 * 1_000_000);
+        assertEq(offeringEscrow.totalRefunded(), 9_000 * 1_000_000);
+        assertEq(offeringEscrow.totalRefunded(), offeringEscrow.totalContributed());
+        assertEq(usdc.balanceOf(address(offeringEscrow)), 0);
+    }
+
+    function testSuccessfulOfferingCannotRefund() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        bytes32 subscriptionId = manager.subscriptionIdBySequence(offeringId, 0);
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+
+        assertFalse(offeringEscrow.refundable());
+        assertFalse(allocationEscrow.tombstoned());
+        vm.prank(investor);
+        vm.expectRevert(OfferingEscrow.RefundsNotEnabled.selector);
+        offeringEscrow.claimRefund(subscriptionId);
+    }
+
+    function testTombstonePropagationFailureRollsBackOutcomeAndRefundGate() public {
+        OfferingManager.OfferingConfig memory config = _validConfig();
+        bytes32 expectedOfferingId = _expectedOfferingId(config, 0);
+        TombstoneFailAllocationEscrow faultEscrow = new TombstoneFailAllocationEscrow(
+            address(manager), expectedOfferingId, address(revenueToken), FINAL_SUPPLY
+        );
+        investorEligibility.setEligible(address(faultEscrow), ASSET_ID, true);
+        config.allocationEscrow = address(faultEscrow);
+        vm.prank(assetOwner);
+        bytes32 offeringId = manager.createOffering(config);
+        vm.warp(config.opensAt);
+        vm.prank(operator);
+        manager.openOffering(offeringId);
+        vm.warp(config.closesAt);
+
+        vm.expectRevert(TombstoneFailAllocationEscrow.TombstoneFailed.selector);
+        manager.resolveOfferingOutcome(offeringId);
+
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Open));
+        assertFalse(offeringEscrow.refundable());
+        assertFalse(faultEscrow.tombstoned());
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
     }
 
     function testReconciliationDependencyFailureDoesNotConsumeState() public {
@@ -1130,6 +1221,7 @@ contract FaultingAllocationEscrow is IAllocationEscrow {
     address public immutable revenueToken;
     uint256 public immutable finalSupply;
     bool public depositConfirmed;
+    bool public tombstoned;
     uint256 public totalAllocated;
     uint256 public totalReleased;
     bool private immutable _confirmationFailure;
@@ -1161,6 +1253,10 @@ contract FaultingAllocationEscrow is IAllocationEscrow {
     }
 
     function registerAllocation(bytes32, bytes32, address, uint256, uint64) external {}
+
+    function tombstone() external {
+        tombstoned = true;
+    }
 }
 
 contract SubscriptionAllocationEscrowFault is IAllocationEscrow {
@@ -1169,6 +1265,7 @@ contract SubscriptionAllocationEscrowFault is IAllocationEscrow {
     address public immutable revenueToken;
     uint256 public immutable finalSupply;
     bool public depositConfirmed;
+    bool public tombstoned;
     uint256 public totalAllocated;
     uint256 public totalReleased;
 
@@ -1201,6 +1298,42 @@ contract SubscriptionAllocationEscrowFault is IAllocationEscrow {
         if (_failRegistration) revert RegistrationFailed();
         totalAllocated += amount;
         if (_misreportTotal) totalAllocated += 1;
+    }
+
+    function tombstone() external {
+        tombstoned = true;
+    }
+}
+
+contract TombstoneFailAllocationEscrow is IAllocationEscrow {
+    address public immutable offeringManager;
+    bytes32 public immutable offeringId;
+    address public immutable revenueToken;
+    uint256 public immutable finalSupply;
+    bool public depositConfirmed;
+    bool public tombstoned;
+    uint256 public totalAllocated;
+    uint256 public totalReleased;
+
+    error TombstoneFailed();
+
+    constructor(address offeringManager_, bytes32 offeringId_, address revenueToken_, uint256 finalSupply_) {
+        offeringManager = offeringManager_;
+        offeringId = offeringId_;
+        revenueToken = revenueToken_;
+        finalSupply = finalSupply_;
+    }
+
+    function confirmTokenDeposit() external {
+        depositConfirmed = true;
+    }
+
+    function registerAllocation(bytes32, bytes32, address, uint256 amount, uint64) external {
+        totalAllocated += amount;
+    }
+
+    function tombstone() external pure {
+        revert TombstoneFailed();
     }
 }
 

@@ -16,6 +16,14 @@ interface IOfferingEscrow {
 
     function totalContributed() external view returns (uint256);
 
+    function totalRefunded() external view returns (uint256);
+
+    function refundable() external view returns (bool);
+
+    function markRefundable() external;
+
+    function claimRefund(bytes32 subscriptionId) external;
+
     function recordContribution(
         bytes32 subscriptionId,
         address payer,

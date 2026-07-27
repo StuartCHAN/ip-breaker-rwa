@@ -347,6 +347,27 @@ contract LicenseRevenueTokenTest is Test {
         token.executeRecoveryMigration(recoveryId, alice, bob);
     }
 
+    function testRecoveryCannotBypassPreActivationCustody() public {
+        _mintFinalSupplyToAlice();
+        eligibility.setEligible(assetId, bob, true);
+        bytes32 recoveryId = keccak256("pre-activation-recovery");
+        recoveryManager.authorize(recoveryId, address(token), alice, bob);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LicenseRevenueToken.InvalidLifecycle.selector,
+                LicenseRevenueToken.Lifecycle.Minting,
+                LicenseRevenueToken.Lifecycle.Activated
+            )
+        );
+        recoveryManager.execute(address(token), recoveryId, alice, bob);
+
+        assertEq(token.balanceOf(alice), FINAL_SUPPLY);
+        assertEq(token.balanceOf(bob), 0);
+        assertEq(token.totalSupply(), FINAL_SUPPLY);
+        assertFalse(token.executedRecovery(recoveryId));
+    }
+
     function testRecoveryExecutionReplayRejected() public {
         _activateWithAliceHoldingFinalSupply();
         eligibility.setEligible(assetId, bob, true);

@@ -162,6 +162,7 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     function executeRecoveryMigration(bytes32 recoveryId, address source, address destination) external {
         IRecoveryManager manager = recoveryManager;
         if (msg.sender != address(manager)) revert OnlyRecoveryManager(msg.sender);
+        if (lifecycle != Lifecycle.Activated) revert InvalidLifecycle(lifecycle, Lifecycle.Activated);
         if (recoveryId == bytes32(0)) revert InvalidRecoveryId();
         if (executedRecovery[recoveryId]) revert RecoveryAlreadyExecuted(recoveryId);
         if (source == address(0)) revert InvalidRecoveryAccount(source);
