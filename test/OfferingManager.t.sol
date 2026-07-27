@@ -1227,6 +1227,40 @@ contract OfferingManagerTest is Test {
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBefore);
     }
 
+    function testUnsolicitedSettlementDustDoesNotBlockFinalizationOrChangeAccounting() public {
+        bytes32 offeringId = _prepareFinalizableOffering();
+        uint256 dust = 1;
+        uint256 contributedBefore = offeringEscrow.totalContributed();
+        uint256 escrowUSDCBefore = usdc.balanceOf(address(offeringEscrow));
+        uint256 treasuryBefore = usdc.balanceOf(issuerTreasury);
+        uint256 feeRecipientBefore = usdc.balanceOf(feeRecipient);
+
+        usdc.mint(outsider, dust);
+        vm.prank(outsider);
+        usdc.transfer(address(manager), dust);
+
+        vm.prank(outsider);
+        manager.finalizeOffering(offeringId);
+
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Finalized));
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Activated));
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Active)
+        );
+        assertEq(uint256(revenueVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Enabled));
+        assertTrue(offeringEscrow.proceedsEnabled());
+
+        uint256 expectedFee = contributedBefore * 250 / 10_000;
+        assertEq(offeringEscrow.totalContributed(), contributedBefore);
+        assertEq(offeringEscrow.protocolFee(), expectedFee);
+        assertEq(offeringEscrow.issuerProceeds(), contributedBefore - expectedFee);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), escrowUSDCBefore);
+        assertEq(usdc.balanceOf(address(manager)), dust);
+        assertEq(usdc.balanceOf(issuerTreasury), treasuryBefore);
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBefore);
+    }
+
     function testAtomicFinalizationEnablesProductionRevenueVault() public {
         RevenueVault productionVault =
             new RevenueVault(address(revenueToken), address(usdc), admin, outsider, address(manager));
