@@ -26,9 +26,19 @@ interface IOfferingEscrow {
 
     function protocolFee() external view returns (uint256);
 
+    function issuerClaimed() external view returns (bool);
+
+    function feeClaimed() external view returns (bool);
+
+    function totalProceedsClaimed() external view returns (uint256);
+
     function markRefundable() external;
 
     function enableProceeds() external;
+
+    function claimIssuerProceeds() external returns (uint256 amount);
+
+    function claimProtocolFee() external returns (uint256 amount);
 
     function claimRefund(bytes32 subscriptionId) external;
 

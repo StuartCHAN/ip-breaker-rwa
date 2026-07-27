@@ -9,6 +9,10 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IOfferingEscrow} from "./interfaces/IOfferingEscrow.sol";
 
+interface IOfferingStatusSource {
+    function getOfferingStatus(bytes32 offeringId) external view returns (uint8);
+}
+
 /// @title OfferingEscrow
 /// @notice Exact USDC custody and immutable contribution ledger for one offering.
 contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
@@ -29,6 +33,7 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
 
     uint8 public constant REQUIRED_SETTLEMENT_DECIMALS = 6;
     uint16 public constant MAX_BPS = 10_000;
+    uint8 private constant FINALIZED_STATUS = 5;
 
     address public immutable offeringManager;
     bytes32 public immutable offeringId;
@@ -43,6 +48,9 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
     bool public proceedsEnabled;
     uint256 public issuerProceeds;
     uint256 public protocolFee;
+    bool public issuerClaimed;
+    bool public feeClaimed;
+    uint256 public totalProceedsClaimed;
     mapping(bytes32 subscriptionId => Contribution contribution) private _contributions;
     mapping(bytes32 paymentReference => bool used) public paymentReferenceUsed;
 
@@ -67,6 +75,13 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
     error ProceedsAlreadyEnabled();
     error RefundPathActive();
     error ProceedsConservationViolation(uint256 issuerAmount, uint256 feeAmount, uint256 contributed);
+    error ProceedsNotEnabled();
+    error OfferingNotFinalized(uint8 status);
+    error UnauthorizedIssuerClaimant(address caller, address issuerTreasury);
+    error UnauthorizedFeeClaimant(address caller, address feeRecipient);
+    error IssuerProceedsAlreadyClaimed();
+    error ProtocolFeeAlreadyClaimed();
+    error ProceedsClaimsExceedContributions(uint256 claimed, uint256 contributed);
     error RefundsNotEnabled();
     error UnknownContribution(bytes32 subscriptionId);
     error UnauthorizedRefundClaimant(address caller, address payer);
@@ -86,6 +101,8 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
     );
     event RefundsEnabled(bytes32 indexed offeringId);
     event ProceedsEnabled(bytes32 indexed offeringId, uint256 issuerProceeds, uint256 protocolFee);
+    event IssuerProceedsClaimed(bytes32 indexed offeringId, address indexed issuerTreasury, uint256 amount);
+    event ProtocolFeeClaimed(bytes32 indexed offeringId, address indexed feeRecipient, uint256 amount);
     event RefundClaimed(
         bytes32 indexed offeringId, bytes32 indexed subscriptionId, address indexed payer, uint256 amount
     );
@@ -229,6 +246,36 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
         emit ProceedsEnabled(offeringId, issuerAmount, feeAmount);
     }
 
+    function claimIssuerProceeds() external nonReentrant returns (uint256 amount) {
+        _requireFinalized();
+        if (!proceedsEnabled) revert ProceedsNotEnabled();
+        if (msg.sender != issuerTreasury) {
+            revert UnauthorizedIssuerClaimant(msg.sender, issuerTreasury);
+        }
+        if (issuerClaimed) revert IssuerProceedsAlreadyClaimed();
+
+        issuerClaimed = true;
+        amount = issuerProceeds;
+        _claimProceeds(msg.sender, amount);
+
+        emit IssuerProceedsClaimed(offeringId, msg.sender, amount);
+    }
+
+    function claimProtocolFee() external nonReentrant returns (uint256 amount) {
+        _requireFinalized();
+        if (!proceedsEnabled) revert ProceedsNotEnabled();
+        if (msg.sender != feeRecipient) {
+            revert UnauthorizedFeeClaimant(msg.sender, feeRecipient);
+        }
+        if (feeClaimed) revert ProtocolFeeAlreadyClaimed();
+
+        feeClaimed = true;
+        amount = protocolFee;
+        _claimProceeds(msg.sender, amount);
+
+        emit ProtocolFeeClaimed(offeringId, msg.sender, amount);
+    }
+
     function claimRefund(bytes32 subscriptionId) external nonReentrant {
         if (!refundable) revert RefundsNotEnabled();
         Contribution storage contribution = _contributions[subscriptionId];
@@ -255,5 +302,28 @@ contract OfferingEscrow is IOfferingEscrow, ReentrancyGuard {
 
     function getContribution(bytes32 subscriptionId) external view returns (Contribution memory) {
         return _contributions[subscriptionId];
+    }
+
+    function _requireFinalized() private view {
+        uint8 status = IOfferingStatusSource(offeringManager).getOfferingStatus(offeringId);
+        if (status != FINALIZED_STATUS) revert OfferingNotFinalized(status);
+    }
+
+    function _claimProceeds(address beneficiary, uint256 amount) private {
+        uint256 newTotalClaimed = totalProceedsClaimed + amount;
+        if (newTotalClaimed > totalContributed) {
+            revert ProceedsClaimsExceedContributions(newTotalClaimed, totalContributed);
+        }
+
+        IERC20 token = IERC20(settlementToken);
+        uint256 available = token.balanceOf(address(this));
+        if (available < amount) revert EscrowInsolvent(amount, available);
+
+        totalProceedsClaimed = newTotalClaimed;
+        if (amount != 0) token.safeTransfer(beneficiary, amount);
+
+        uint256 requiredBalance = totalContributed - newTotalClaimed;
+        uint256 actualBalance = token.balanceOf(address(this));
+        if (actualBalance < requiredBalance) revert EscrowInsolvent(requiredBalance, actualBalance);
     }
 }

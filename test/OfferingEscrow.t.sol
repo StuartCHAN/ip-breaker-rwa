@@ -22,6 +22,8 @@ contract OfferingEscrowTest is Test {
     address private outsider = makeAddr("outsider");
 
     event ProceedsEnabled(bytes32 indexed offeringId, uint256 issuerProceeds, uint256 protocolFee);
+    event IssuerProceedsClaimed(bytes32 indexed offeringId, address indexed issuerTreasury, uint256 amount);
+    event ProtocolFeeClaimed(bytes32 indexed offeringId, address indexed feeRecipient, uint256 amount);
 
     function setUp() public {
         manager = new ContributionManagerMock();
@@ -202,9 +204,109 @@ contract OfferingEscrowTest is Test {
         assertEq(escrow.issuerProceeds(), 0);
         assertEq(escrow.protocolFee(), 0);
     }
+
+    function testIssuerAndFeeClaimsSucceedIndependentlyAndConserveUSDC() public {
+        _prepareFinalizedProceeds();
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit ProtocolFeeClaimed(OFFERING_ID, feeRecipient, 12_500);
+        vm.prank(feeRecipient);
+        assertEq(escrow.claimProtocolFee(), 12_500);
+        assertEq(usdc.balanceOf(address(escrow)), 487_500);
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit IssuerProceedsClaimed(OFFERING_ID, treasury, 487_500);
+        vm.prank(treasury);
+        assertEq(escrow.claimIssuerProceeds(), 487_500);
+
+        assertTrue(escrow.issuerClaimed());
+        assertTrue(escrow.feeClaimed());
+        assertEq(escrow.totalProceedsClaimed(), escrow.totalContributed());
+        assertEq(usdc.balanceOf(treasury), 487_500);
+        assertEq(usdc.balanceOf(feeRecipient), 12_500);
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+    }
+
+    function testOnlyFrozenBeneficiariesCanClaimAndClaimsCannotRepeat() public {
+        _prepareFinalizedProceeds();
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.UnauthorizedIssuerClaimant.selector, outsider, treasury));
+        escrow.claimIssuerProceeds();
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.UnauthorizedFeeClaimant.selector, outsider, feeRecipient));
+        escrow.claimProtocolFee();
+
+        vm.prank(treasury);
+        escrow.claimIssuerProceeds();
+        vm.prank(treasury);
+        vm.expectRevert(OfferingEscrow.IssuerProceedsAlreadyClaimed.selector);
+        escrow.claimIssuerProceeds();
+
+        vm.prank(feeRecipient);
+        escrow.claimProtocolFee();
+        vm.prank(feeRecipient);
+        vm.expectRevert(OfferingEscrow.ProtocolFeeAlreadyClaimed.selector);
+        escrow.claimProtocolFee();
+    }
+
+    function testClaimsRequireFinalizedAndEnabledProceeds() public {
+        manager.setOfferingStatus(5);
+        vm.prank(treasury);
+        vm.expectRevert(OfferingEscrow.ProceedsNotEnabled.selector);
+        escrow.claimIssuerProceeds();
+
+        manager.record(escrow, SUBSCRIPTION_ID, payer, destination, 500_000, 500 ether, PAYMENT_REFERENCE, 0);
+        manager.enableProceeds(escrow);
+        manager.setOfferingStatus(3);
+
+        vm.prank(treasury);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.OfferingNotFinalized.selector, uint8(3)));
+        escrow.claimIssuerProceeds();
+
+        manager.setOfferingStatus(4);
+        vm.prank(feeRecipient);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.OfferingNotFinalized.selector, uint8(4)));
+        escrow.claimProtocolFee();
+    }
+
+    function testIssuerAndFeeTransferFailuresRollbackClaimAccounting() public {
+        _prepareFinalizedProceeds();
+        usdc.setTransferFailure(true);
+
+        vm.prank(treasury);
+        vm.expectRevert(SixDecimalSettlementMock.TransferFailed.selector);
+        escrow.claimIssuerProceeds();
+        assertFalse(escrow.issuerClaimed());
+        assertEq(escrow.totalProceedsClaimed(), 0);
+
+        vm.prank(feeRecipient);
+        vm.expectRevert(SixDecimalSettlementMock.TransferFailed.selector);
+        escrow.claimProtocolFee();
+        assertFalse(escrow.feeClaimed());
+        assertEq(escrow.totalProceedsClaimed(), 0);
+        assertEq(usdc.balanceOf(address(escrow)), 500_000);
+    }
+
+    function _prepareFinalizedProceeds() private {
+        manager.record(escrow, SUBSCRIPTION_ID, payer, destination, 500_000, 500 ether, PAYMENT_REFERENCE, 0);
+        manager.enableProceeds(escrow);
+        manager.setOfferingStatus(5);
+    }
 }
 
 contract ContributionManagerMock {
+    uint8 private _offeringStatus;
+
+    function getOfferingStatus(bytes32) external view returns (uint8) {
+        return _offeringStatus;
+    }
+
+    function setOfferingStatus(uint8 status) external {
+        _offeringStatus = status;
+    }
+
     function record(
         OfferingEscrow escrow,
         bytes32 subscriptionId,

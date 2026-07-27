@@ -1252,6 +1252,36 @@ contract OfferingManagerTest is Test {
         assertTrue(offeringEscrow.proceedsEnabled());
     }
 
+    function testFinalizedIssuerAndFeePullClaimsPreserveFinalEconomicInvariants() public {
+        bytes32 offeringId = _prepareFinalizableOffering();
+        manager.finalizeOffering(offeringId);
+        uint256 totalContributed = offeringEscrow.totalContributed();
+        uint256 issuerAmount = offeringEscrow.issuerProceeds();
+        uint256 feeAmount = offeringEscrow.protocolFee();
+
+        vm.prank(feeRecipient);
+        assertEq(offeringEscrow.claimProtocolFee(), feeAmount);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), issuerAmount);
+
+        vm.prank(issuerTreasury);
+        assertEq(offeringEscrow.claimIssuerProceeds(), issuerAmount);
+
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Finalized));
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Activated));
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Active)
+        );
+        assertEq(uint256(revenueVault.depositLifecycle()), uint256(IRevenueVault.DepositLifecycle.Enabled));
+        assertEq(issuerAmount + feeAmount, totalContributed);
+        assertEq(offeringEscrow.totalProceedsClaimed(), totalContributed);
+        assertEq(usdc.balanceOf(issuerTreasury), issuerAmount);
+        assertEq(usdc.balanceOf(feeRecipient), feeAmount);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), 0);
+        assertEq(usdc.balanceOf(address(manager)), 0);
+        assertEq(revenueToken.balanceOf(address(manager)), 0);
+    }
+
     function testFinalizationRequiresCompleteDeliveryAndCannotReplay() public {
         bytes32 offeringId = _subscribeFullOffering();
         vm.warp(manager.getOffering(offeringId).config.closesAt);
@@ -1305,6 +1335,34 @@ contract OfferingManagerTest is Test {
             )
         );
         manager.finalizeOffering(offeringId);
+    }
+
+    function testOfferingFailedCannotClaimProceeds() public {
+        bytes32 offeringId = _openOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.resolveOfferingOutcome(offeringId);
+
+        vm.prank(issuerTreasury);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.OfferingNotFinalized.selector, uint8(4)));
+        offeringEscrow.claimIssuerProceeds();
+
+        assertTrue(offeringEscrow.refundable());
+        assertFalse(offeringEscrow.proceedsEnabled());
+        assertEq(offeringEscrow.totalProceedsClaimed(), 0);
+    }
+
+    function testDraftExpiredOfferingCannotClaimProceeds() public {
+        bytes32 offeringId = _createOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.expireDraft(offeringId);
+
+        vm.prank(feeRecipient);
+        vm.expectRevert(abi.encodeWithSelector(OfferingEscrow.OfferingNotFinalized.selector, uint8(4)));
+        offeringEscrow.claimProtocolFee();
+
+        assertFalse(offeringEscrow.refundable());
+        assertFalse(offeringEscrow.proceedsEnabled());
+        assertEq(offeringEscrow.totalProceedsClaimed(), 0);
     }
 
     function testTokenActivationFailureRollsBackFinalization() public {
