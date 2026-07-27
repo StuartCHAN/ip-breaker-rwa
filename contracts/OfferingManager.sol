@@ -13,6 +13,7 @@ import {IInvestorEligibility} from "./interfaces/IInvestorEligibility.sol";
 import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 import {ILegalHoldEscrow} from "./interfaces/ILegalHoldEscrow.sol";
 import {IOfferingEscrow} from "./interfaces/IOfferingEscrow.sol";
+import {IRevenueProgramRegistry} from "./interfaces/IRevenueProgramRegistry.sol";
 
 /// @notice Issuer/SPV verification boundary; deliberately separate from investor and asset-owner roles.
 interface IIssuerEligibility {
@@ -110,6 +111,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     IIdentityRegistry public immutable identityRegistry;
     IIPAssetRegistry public immutable assetRegistry;
     IIssuerEligibility public immutable issuerEligibility;
+    IRevenueProgramRegistry public immutable revenueProgramRegistry;
 
     mapping(bytes32 offeringId => Offering offering) private _offerings;
     mapping(address creator => uint256 nonce) public creatorNonce;
@@ -121,6 +123,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     error ZeroIdentityRegistry();
     error ZeroAssetRegistry();
     error ZeroIssuerEligibility();
+    error ZeroRevenueProgramRegistry();
     error AssetDoesNotExist(uint256 assetId);
     error UnauthorizedAssetOwner(address caller, address currentOwner);
     error AssetOwnerIdentityInvalid(address account);
@@ -195,6 +198,10 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     error LegalHoldPositionMissing(bytes32 subscriptionId);
     error LegalHoldPositionAlreadyReleased(bytes32 subscriptionId);
     error LegalHoldReleaseEligibilityInvalid(bytes32 subscriptionId, uint8 reason);
+    error RevenueProgramBindingMismatch(bytes32 offeringId);
+    error RevenueProgramStateMismatch(
+        bytes32 offeringId, IRevenueProgramRegistry.ProgramStatus expected, IRevenueProgramRegistry.ProgramStatus actual
+    );
 
     event OfferingCreated(
         bytes32 indexed offeringId,
@@ -261,15 +268,24 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         uint256 amount
     );
 
-    constructor(address admin_, address identityRegistry_, address assetRegistry_, address issuerEligibility_) {
+    constructor(
+        address admin_,
+        address identityRegistry_,
+        address assetRegistry_,
+        address issuerEligibility_,
+        address revenueProgramRegistry_
+    ) {
         if (admin_ == address(0)) revert ZeroAdmin();
         if (identityRegistry_ == address(0)) revert ZeroIdentityRegistry();
         if (assetRegistry_ == address(0)) revert ZeroAssetRegistry();
         if (issuerEligibility_ == address(0)) revert ZeroIssuerEligibility();
+        if (revenueProgramRegistry_ == address(0)) revert ZeroRevenueProgramRegistry();
+        _requireContract(revenueProgramRegistry_);
 
         identityRegistry = IIdentityRegistry(identityRegistry_);
         assetRegistry = IIPAssetRegistry(assetRegistry_);
         issuerEligibility = IIssuerEligibility(issuerEligibility_);
+        revenueProgramRegistry = IRevenueProgramRegistry(revenueProgramRegistry_);
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _setRoleAdmin(OFFERING_OPERATOR_ROLE, DEFAULT_ADMIN_ROLE);
@@ -294,6 +310,11 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
             )
         );
         if (_offerings[offeringId].status != OfferingStatus.None) revert OfferingAlreadyExists(offeringId);
+
+        revenueProgramRegistry.reserveProgram(
+            offeringId, config.assetId, config.issuer, config.revenueToken, config.revenueVault, config.settlementToken
+        );
+        _validateRevenueProgramBinding(offeringId, config);
 
         uint256 targetUSDC = Math.mulDiv(config.finalSupply, config.pricePerWholeTokenUSDC, TOKEN_UNIT);
         creatorNonce[msg.sender] = nonce + 1;
@@ -635,6 +656,16 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
             offering.status = OfferingStatus.Failed;
             IOfferingEscrow(offering.config.offeringEscrow).markRefundable();
             IAllocationEscrow(offering.config.allocationEscrow).tombstone();
+            revenueProgramRegistry.failProgram(offeringId);
+            IRevenueProgramRegistry.RevenueProgram memory program = revenueProgramRegistry.getProgram(offeringId);
+            if (program.status != IRevenueProgramRegistry.ProgramStatus.Failed) {
+                revert RevenueProgramStateMismatch(
+                    offeringId, IRevenueProgramRegistry.ProgramStatus.Failed, program.status
+                );
+            }
+            if (revenueProgramRegistry.liveOfferingByAsset(offering.config.assetId) != bytes32(0)) {
+                revert RevenueProgramBindingMismatch(offeringId);
+            }
             emit OfferingStatusChanged(offeringId, OfferingStatus.Open, OfferingStatus.Failed);
             emit OfferingFailed(offeringId, offering.validSoldSupply, offering.validCommittedUSDC);
         }
@@ -864,6 +895,23 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
 
         uint256 ownerRole = identityRegistry.ROLE_ASSET_OWNER();
         if (!identityRegistry.hasBusinessRole(caller, ownerRole)) revert AssetOwnerIdentityInvalid(caller);
+    }
+
+    function _validateRevenueProgramBinding(bytes32 offeringId, OfferingConfig calldata config) private view {
+        IRevenueProgramRegistry.RevenueProgram memory program = revenueProgramRegistry.getProgram(offeringId);
+        if (program.status != IRevenueProgramRegistry.ProgramStatus.Reserved) {
+            revert RevenueProgramStateMismatch(
+                offeringId, IRevenueProgramRegistry.ProgramStatus.Reserved, program.status
+            );
+        }
+        if (
+            program.offeringId != offeringId || program.assetId != config.assetId || program.issuer != config.issuer
+                || program.revenueToken != config.revenueToken || program.revenueVault != config.revenueVault
+                || program.settlementToken != config.settlementToken
+                || revenueProgramRegistry.liveOfferingByAsset(config.assetId) != offeringId
+        ) {
+            revert RevenueProgramBindingMismatch(offeringId);
+        }
     }
 
     function _validateConfig(OfferingConfig calldata config) private view {

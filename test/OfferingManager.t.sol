@@ -8,6 +8,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {AllocationEscrow} from "../contracts/AllocationEscrow.sol";
 import {OfferingEscrow} from "../contracts/OfferingEscrow.sol";
 import {OfferingManager, IIssuerEligibility} from "../contracts/OfferingManager.sol";
+import {RevenueProgramRegistry} from "../contracts/RevenueProgramRegistry.sol";
 import {LicenseRevenueToken} from "../contracts/LicenseRevenueToken.sol";
 import {IAllocationEscrow} from "../contracts/interfaces/IAllocationEscrow.sol";
 import {IIdentityRegistry} from "../contracts/interfaces/IIdentityRegistry.sol";
@@ -16,12 +17,14 @@ import {IIPAssetRegistry} from "../contracts/interfaces/IIPAssetRegistry.sol";
 import {ILegalHoldEscrow} from "../contracts/interfaces/ILegalHoldEscrow.sol";
 import {IRecoveryManager} from "../contracts/interfaces/IRecoveryManager.sol";
 import {IRevenueVault} from "../contracts/interfaces/IRevenueVault.sol";
+import {IRevenueProgramRegistry} from "../contracts/interfaces/IRevenueProgramRegistry.sol";
 
 contract OfferingManagerTest is Test {
     OfferingManager private manager;
     OfferingIdentityMock private identityRegistry;
     OfferingAssetRegistryMock private assetRegistry;
     IssuerEligibilityMock private issuerEligibility;
+    RevenueProgramRegistry private programRegistry;
     SixDecimalUSDCMock private usdc;
 
     address private admin = makeAddr("admin");
@@ -73,12 +76,20 @@ contract OfferingManagerTest is Test {
 
         investorEligibility = new OfferingInvestorEligibilityMock();
         recoveryManager = new OfferingRecoveryManagerMock();
+        programRegistry = new RevenueProgramRegistry(admin);
 
-        manager =
-            new OfferingManager(admin, address(identityRegistry), address(assetRegistry), address(issuerEligibility));
+        manager = new OfferingManager(
+            admin,
+            address(identityRegistry),
+            address(assetRegistry),
+            address(issuerEligibility),
+            address(programRegistry)
+        );
         bytes32 operatorRole = manager.OFFERING_OPERATOR_ROLE();
-        vm.prank(admin);
+        vm.startPrank(admin);
         manager.grantRole(operatorRole, operator);
+        programRegistry.grantRole(programRegistry.PROGRAM_MANAGER_ROLE(), address(manager));
+        vm.stopPrank();
 
         assetRegistry.setAsset(ASSET_ID, assetOwner);
         identityRegistry.setAssetOwner(assetOwner, true);
@@ -215,6 +226,14 @@ contract OfferingManagerTest is Test {
         vm.prank(assetOwner);
         bytes32 actualId = manager.createOffering(config);
         assertEq(actualId, offeringId);
+        IRevenueProgramRegistry.RevenueProgram memory reservedProgram = programRegistry.getProgram(offeringId);
+        assertEq(uint256(reservedProgram.status), uint256(IRevenueProgramRegistry.ProgramStatus.Reserved));
+        assertEq(reservedProgram.assetId, ASSET_ID);
+        assertEq(reservedProgram.issuer, issuer);
+        assertEq(reservedProgram.revenueToken, address(revenueToken));
+        assertEq(reservedProgram.revenueVault, address(revenueVault));
+        assertEq(reservedProgram.settlementToken, address(usdc));
+        assertEq(programRegistry.liveOfferingByAsset(ASSET_ID), offeringId);
 
         vm.warp(config.opensAt);
         vm.expectEmit(true, true, false, true, address(manager));
@@ -769,6 +788,11 @@ contract OfferingManagerTest is Test {
         assertEq(usdc.balanceOf(address(offeringEscrow)), usdcBalance);
         assertEq(revenueToken.balanceOf(address(allocationEscrow)), tokenBalance);
         assertEq(allocationEscrow.totalReleased(), 0);
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Reserved)
+        );
+        assertEq(programRegistry.liveOfferingByAsset(ASSET_ID), offeringId);
     }
 
     function testReconciliationMustProcessInSequenceAndCannotRepeat() public {
@@ -817,6 +841,11 @@ contract OfferingManagerTest is Test {
         assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
         assertEq(revenueToken.balanceOf(address(allocationEscrow)), FINAL_SUPPLY);
         assertEq(allocationEscrow.totalReleased(), 0);
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Failed)
+        );
+        assertEq(programRegistry.liveOfferingByAsset(ASSET_ID), bytes32(0));
     }
 
     function testDestinationOrPayerEligibilityLossMakesSubscriptionInvalid() public {
@@ -1222,6 +1251,65 @@ contract OfferingManagerTest is Test {
         assertFalse(offeringEscrow.refundable());
         assertFalse(faultEscrow.tombstoned());
         assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Reserved)
+        );
+    }
+
+    function testProgramFailureDependencyRollbackRestoresManagerAndEscrows() public {
+        bytes32 offeringId = _openOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        bytes32 programManagerRole = programRegistry.PROGRAM_MANAGER_ROLE();
+        vm.prank(admin);
+        programRegistry.revokeRole(programManagerRole, address(manager));
+
+        vm.expectRevert();
+        manager.resolveOfferingOutcome(offeringId);
+
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Open));
+        assertFalse(offeringEscrow.refundable());
+        assertFalse(allocationEscrow.tombstoned());
+        assertEq(
+            uint256(programRegistry.getProgram(offeringId).status),
+            uint256(IRevenueProgramRegistry.ProgramStatus.Reserved)
+        );
+        assertEq(programRegistry.liveOfferingByAsset(ASSET_ID), offeringId);
+    }
+
+    function testProgramBindingMismatchRollsBackDraftAndCreatorNonce() public {
+        MismatchedRevenueProgramRegistry mismatchedRegistry = new MismatchedRevenueProgramRegistry(outsider);
+        OfferingManager mismatchedManager = new OfferingManager(
+            admin,
+            address(identityRegistry),
+            address(assetRegistry),
+            address(issuerEligibility),
+            address(mismatchedRegistry)
+        );
+        OfferingManager.OfferingConfig memory config = _validConfig();
+        bytes32 expectedOfferingId = keccak256(
+            abi.encode(
+                block.chainid,
+                address(mismatchedManager),
+                address(assetRegistry),
+                config.assetId,
+                assetOwner,
+                config.issuer,
+                uint256(0),
+                config.termsHash
+            )
+        );
+
+        vm.prank(assetOwner);
+        vm.expectRevert(
+            abi.encodeWithSelector(OfferingManager.RevenueProgramBindingMismatch.selector, expectedOfferingId)
+        );
+        mismatchedManager.createOffering(config);
+
+        assertEq(mismatchedManager.creatorNonce(assetOwner), 0);
+        assertEq(mismatchedRegistry.liveOfferingByAsset(ASSET_ID), bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(OfferingManager.OfferingNotFound.selector, expectedOfferingId));
+        mismatchedManager.getOffering(expectedOfferingId);
     }
 
     function testReconciliationDependencyFailureDoesNotConsumeState() public {
@@ -1638,6 +1726,55 @@ contract TombstoneFailAllocationEscrow is IAllocationEscrow {
 
     function tombstone() external pure {
         revert TombstoneFailed();
+    }
+}
+
+contract MismatchedRevenueProgramRegistry is IRevenueProgramRegistry {
+    address private immutable _wrongRevenueToken;
+    RevenueProgram private _program;
+    mapping(uint256 assetId => bytes32 offeringId) private _liveOfferings;
+
+    constructor(address wrongRevenueToken_) {
+        _wrongRevenueToken = wrongRevenueToken_;
+    }
+
+    function reserveProgram(
+        bytes32 offeringId,
+        uint256 assetId,
+        address issuer,
+        address,
+        address revenueVault,
+        address settlementToken
+    ) external {
+        _program = RevenueProgram({
+            assetId: assetId,
+            offeringId: offeringId,
+            issuer: issuer,
+            revenueToken: _wrongRevenueToken,
+            revenueVault: revenueVault,
+            settlementToken: settlementToken,
+            status: ProgramStatus.Reserved,
+            reservedAt: uint64(block.timestamp),
+            activatedAt: 0,
+            failedAt: 0
+        });
+        _liveOfferings[assetId] = offeringId;
+    }
+
+    function activateProgram(bytes32) external {}
+
+    function failProgram(bytes32) external {}
+
+    function getProgram(bytes32) external view returns (RevenueProgram memory) {
+        return _program;
+    }
+
+    function liveOfferingByAsset(uint256 assetId) external view returns (bytes32) {
+        return _liveOfferings[assetId];
+    }
+
+    function activeOfferingByAsset(uint256) external pure returns (bytes32) {
+        return bytes32(0);
     }
 }
 
