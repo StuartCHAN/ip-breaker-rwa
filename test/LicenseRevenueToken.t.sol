@@ -85,6 +85,22 @@ contract LicenseRevenueTokenTest is Test {
         token.bindRevenueVault(address(replacement));
     }
 
+    function testPrimaryDistributionEscrowBindingIsControllerOnlyAndOneTime() public {
+        vm.prank(outsider);
+        vm.expectRevert();
+        token.bindPrimaryDistributionEscrow(alice);
+
+        vm.prank(controller);
+        token.bindPrimaryDistributionEscrow(alice);
+
+        vm.prank(controller);
+        vm.expectRevert(
+            abi.encodeWithSelector(LicenseRevenueToken.PrimaryDistributionEscrowAlreadyBound.selector, alice)
+        );
+        token.bindPrimaryDistributionEscrow(bob);
+        assertEq(token.primaryDistributionEscrow(), alice);
+    }
+
     function testRevenueVaultMustBindBackToToken() public {
         LicenseRevenueToken unbound = _deployToken(assetId, FINAL_SUPPLY, address(eligibility), controller);
         MockRevenueVault wrongVault = new MockRevenueVault(address(token));
@@ -257,6 +273,25 @@ contract LicenseRevenueTokenTest is Test {
         vm.prank(alice);
         vm.expectRevert(LicenseRevenueToken.TransfersNotActive.selector);
         token.transfer(bob, 1 ether);
+    }
+
+    function testOnlyBoundEscrowCanDeliverBeforeActivation() public {
+        vm.prank(controller);
+        token.bindPrimaryDistributionEscrow(alice);
+        _mintFinalSupplyToAlice();
+        eligibility.setEligible(assetId, bob, true);
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(LicenseRevenueToken.OnlyPrimaryDistributionEscrow.selector, outsider));
+        token.executePrimaryDelivery(bob, 1 ether);
+
+        vm.prank(alice);
+        token.executePrimaryDelivery(bob, 1 ether);
+
+        assertEq(token.balanceOf(alice), FINAL_SUPPLY - 1 ether);
+        assertEq(token.balanceOf(bob), 1 ether);
+        assertEq(token.totalSupply(), FINAL_SUPPLY);
+        assertEq(uint256(token.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
     }
 
     function testEligibleInvestorsCanTransferAfterActivation() public {

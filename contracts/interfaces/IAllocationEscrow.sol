@@ -24,6 +24,8 @@ interface IAllocationEscrow {
 
     function tombstone() external;
 
+    function releaseAllocation(bytes32 subscriptionId) external;
+
     function registerAllocation(
         bytes32 subscriptionId,
         bytes32 investorCommitment,

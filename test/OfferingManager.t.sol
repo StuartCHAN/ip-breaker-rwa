@@ -250,6 +250,7 @@ contract OfferingManagerTest is Test {
         assertEq(revenueToken.balanceOf(address(allocationEscrow)), FINAL_SUPPLY);
         assertTrue(allocationEscrow.depositConfirmed());
         assertFalse(revenueToken.hasRole(revenueToken.MINTER_ROLE(), address(manager)));
+        assertEq(revenueToken.primaryDistributionEscrow(), address(allocationEscrow));
     }
 
     function testMintFailureRollsBackEntireOpen() public {
@@ -287,6 +288,7 @@ contract OfferingManagerTest is Test {
         assertEq(revenueToken.balanceOf(address(faultingEscrow)), 0);
         assertEq(address(revenueToken.revenueVault()), address(0));
         assertEq(address(revenueToken.recoveryManager()), address(0));
+        assertEq(revenueToken.primaryDistributionEscrow(), address(0));
     }
 
     function testEscrowCustodyConfirmationInvariantEnforced() public {
@@ -402,6 +404,25 @@ contract OfferingManagerTest is Test {
         assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Draft));
         assertEq(foreignControlledToken.totalSupply(), 0);
         assertEq(uint256(foreignControlledToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Created));
+    }
+
+    function testOpenRejectsPreboundWrongDistributionEscrow() public {
+        bytes32 offeringId = _createOffering();
+        vm.prank(address(manager));
+        revenueToken.bindPrimaryDistributionEscrow(outsider);
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        vm.warp(offering.config.opensAt);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.TokenDistributionEscrowMismatch.selector, address(allocationEscrow), outsider
+            )
+        );
+        manager.openOffering(offeringId);
+
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Draft));
+        assertEq(revenueToken.totalSupply(), 0);
     }
 
     function testOpenRejectsWrongAllocationEscrowManagerBinding() public {
@@ -938,6 +959,152 @@ contract OfferingManagerTest is Test {
         offeringEscrow.claimRefund(subscriptionId);
     }
 
+    function testPermissionlessSuccessfulDeliveryPreservesUSDCAndMintingLifecycle() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        bytes32 subscriptionId = manager.subscriptionIdBySequence(offeringId, 0);
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        uint256 contributedBefore = offeringEscrow.totalContributed();
+        uint256 escrowUSDCBefore = usdc.balanceOf(address(offeringEscrow));
+
+        vm.prank(outsider);
+        manager.deliverAllocation(offeringId, 0);
+
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        OfferingManager.Subscription memory subscription = manager.getSubscription(subscriptionId);
+        AllocationEscrow.Allocation memory allocation = allocationEscrow.getAllocation(subscriptionId);
+        assertEq(offering.deliveredCount, 1);
+        assertTrue(subscription.deliveryProcessed);
+        assertGt(subscription.deliveredAt, 0);
+        assertEq(uint256(subscription.status), uint256(OfferingManager.SubscriptionStatus.Valid));
+        assertTrue(allocation.released);
+        assertEq(allocation.destination, destination);
+        assertEq(allocation.amount, FINAL_SUPPLY);
+        assertEq(allocationEscrow.totalReleased(), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(destination), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), 0);
+        assertEq(revenueToken.totalSupply(), FINAL_SUPPLY);
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
+        assertEq(offeringEscrow.totalContributed(), contributedBefore);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), escrowUSDCBefore);
+        assertEq(usdc.balanceOf(address(manager)), 0);
+
+        investorEligibility.setEligible(secondDestination, ASSET_ID, true);
+        vm.prank(destination);
+        vm.expectRevert(LicenseRevenueToken.TransfersNotActive.selector);
+        revenueToken.transfer(secondDestination, 1 ether);
+    }
+
+    function testDeliveryRejectedBeforeSuccessfulAndAfterFailed() public {
+        bytes32 openOfferingId = _subscribeFullOffering();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.InvalidOfferingStatus.selector,
+                openOfferingId,
+                OfferingManager.OfferingStatus.Open,
+                OfferingManager.OfferingStatus.Successful
+            )
+        );
+        manager.deliverAllocation(openOfferingId, 0);
+
+        identityRegistry.setLicensee(investor, false);
+        vm.warp(manager.getOffering(openOfferingId).config.closesAt);
+        manager.reconcileSubscription(openOfferingId, 0);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.InvalidOfferingStatus.selector,
+                openOfferingId,
+                OfferingManager.OfferingStatus.Failed,
+                OfferingManager.OfferingStatus.Successful
+            )
+        );
+        manager.deliverAllocation(openOfferingId, 0);
+
+        assertEq(allocationEscrow.totalReleased(), 0);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), FINAL_SUPPLY);
+    }
+
+    function testDeliveryIsStrictlySequentialAndCannotRepeat() public {
+        bytes32 offeringId = _openOffering();
+        _prepareInvestor(investor, destination);
+        _prepareInvestor(secondInvestor, secondDestination);
+        vm.prank(investor);
+        manager.subscribe(offeringId, 4_000 ether, 0, destination, keccak256("delivery-sequence-0"));
+        vm.prank(secondInvestor);
+        manager.subscribe(offeringId, 6_000 ether, 0, secondDestination, keccak256("delivery-sequence-1"));
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        manager.reconcileSubscription(offeringId, 1);
+
+        vm.expectRevert(abi.encodeWithSelector(OfferingManager.InvalidDeliverySequence.selector, uint64(0), uint64(1)));
+        manager.deliverAllocation(offeringId, 1);
+
+        manager.deliverAllocation(offeringId, 0);
+        vm.expectRevert(abi.encodeWithSelector(OfferingManager.InvalidDeliverySequence.selector, uint64(1), uint64(0)));
+        manager.deliverAllocation(offeringId, 0);
+        manager.deliverAllocation(offeringId, 1);
+
+        assertEq(manager.getOffering(offeringId).deliveredCount, 2);
+        assertEq(allocationEscrow.totalReleased(), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(destination), 4_000 ether);
+        assertEq(revenueToken.balanceOf(secondDestination), 6_000 ether);
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Minting));
+    }
+
+    function testIneligibleDestinationEntersRemediationWithoutAddressReplacement() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        bytes32 subscriptionId = manager.subscriptionIdBySequence(offeringId, 0);
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        investorEligibility.setEligible(destination, ASSET_ID, false);
+
+        manager.deliverAllocation(offeringId, 0);
+
+        OfferingManager.Subscription memory subscription = manager.getSubscription(subscriptionId);
+        AllocationEscrow.Allocation memory allocation = allocationEscrow.getAllocation(subscriptionId);
+        assertEq(uint256(subscription.status), uint256(OfferingManager.SubscriptionStatus.Remediation));
+        assertEq(subscription.invalidReason, manager.INVALID_DESTINATION_ELIGIBILITY());
+        assertTrue(subscription.deliveryProcessed);
+        assertEq(subscription.destination, destination);
+        assertEq(allocation.destination, destination);
+        assertFalse(allocation.released);
+        assertEq(allocationEscrow.totalReleased(), 0);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), FINAL_SUPPLY);
+
+        (bool replacementSuccess,) = address(manager)
+            .call(
+                abi.encodeWithSignature(
+                    "deliverAllocation(bytes32,uint64,address)", offeringId, uint64(0), secondDestination
+                )
+            );
+        assertFalse(replacementSuccess);
+        assertEq(revenueToken.balanceOf(secondDestination), 0);
+    }
+
+    function testTokenTransferFailureRollsBackEntireDelivery() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        bytes32 subscriptionId = manager.subscriptionIdBySequence(offeringId, 0);
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        uint256 contributedBefore = offeringEscrow.totalContributed();
+        revenueVault.setCheckpointFailure(true);
+
+        vm.expectRevert(OfferingRevenueVaultMock.CheckpointFailed.selector);
+        manager.deliverAllocation(offeringId, 0);
+
+        OfferingManager.Subscription memory subscription = manager.getSubscription(subscriptionId);
+        assertEq(manager.getOffering(offeringId).deliveredCount, 0);
+        assertFalse(subscription.deliveryProcessed);
+        assertEq(subscription.deliveredAt, 0);
+        assertFalse(allocationEscrow.getAllocation(subscriptionId).released);
+        assertEq(allocationEscrow.totalReleased(), 0);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(destination), 0);
+        assertEq(offeringEscrow.totalContributed(), contributedBefore);
+    }
+
     function testTombstonePropagationFailureRollsBackOutcomeAndRefundGate() public {
         OfferingManager.OfferingConfig memory config = _validConfig();
         bytes32 expectedOfferingId = _expectedOfferingId(config, 0);
@@ -1054,6 +1221,7 @@ contract OfferingManagerTest is Test {
         assertEq(revenueToken.totalSupply(), 0);
         assertEq(revenueToken.balanceOf(address(allocationEscrow)), 0);
         assertFalse(revenueToken.hasRole(revenueToken.MINTER_ROLE(), address(manager)));
+        assertEq(revenueToken.primaryDistributionEscrow(), address(0));
     }
 
     function _validConfig() private view returns (OfferingManager.OfferingConfig memory config) {
@@ -1254,6 +1422,8 @@ contract FaultingAllocationEscrow is IAllocationEscrow {
 
     function registerAllocation(bytes32, bytes32, address, uint256, uint64) external {}
 
+    function releaseAllocation(bytes32) external {}
+
     function tombstone() external {
         tombstoned = true;
     }
@@ -1300,6 +1470,8 @@ contract SubscriptionAllocationEscrowFault is IAllocationEscrow {
         if (_misreportTotal) totalAllocated += 1;
     }
 
+    function releaseAllocation(bytes32) external {}
+
     function tombstone() external {
         tombstoned = true;
     }
@@ -1331,6 +1503,8 @@ contract TombstoneFailAllocationEscrow is IAllocationEscrow {
     function registerAllocation(bytes32, bytes32, address, uint256 amount, uint64) external {
         totalAllocated += amount;
     }
+
+    function releaseAllocation(bytes32) external {}
 
     function tombstone() external pure {
         revert TombstoneFailed();

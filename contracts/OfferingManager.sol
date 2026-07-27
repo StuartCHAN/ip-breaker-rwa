@@ -74,6 +74,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         uint256 validCommittedUSDC;
         uint64 nextSequence;
         uint64 reconciledCount;
+        uint64 deliveredCount;
         OfferingConfig config;
     }
 
@@ -89,7 +90,9 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         uint64 sequence;
         uint64 subscribedAt;
         uint64 reconciledAt;
+        uint64 deliveredAt;
         uint8 invalidReason;
+        bool deliveryProcessed;
         SubscriptionStatus status;
     }
 
@@ -182,6 +185,10 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     error ReconciliationIncomplete(uint64 reconciledCount, uint64 subscriptionCount);
     error NoRemediationRequired(bytes32 subscriptionId);
     error SubscriptionNotValid(bytes32 subscriptionId, SubscriptionStatus status);
+    error InvalidDeliverySequence(uint64 expected, uint64 actual);
+    error DeliverySequenceOutOfBounds(uint64 sequence, uint64 subscriptionCount);
+    error SubscriptionDeliveryAlreadyProcessed(bytes32 subscriptionId);
+    error TokenDistributionEscrowMismatch(address expected, address actual);
 
     event OfferingCreated(
         bytes32 indexed offeringId,
@@ -221,6 +228,16 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     event SubscriptionRemediationFlagged(bytes32 indexed offeringId, bytes32 indexed subscriptionId, uint8 reason);
     event OfferingSuccessful(bytes32 indexed offeringId, uint256 validSoldSupply, uint256 validCommittedUSDC);
     event OfferingFailed(bytes32 indexed offeringId, uint256 validSoldSupply, uint256 validCommittedUSDC);
+    event AllocationDelivered(
+        bytes32 indexed offeringId,
+        bytes32 indexed subscriptionId,
+        uint64 indexed sequence,
+        address destination,
+        uint256 amount
+    );
+    event AllocationDeliveryRemediation(
+        bytes32 indexed offeringId, bytes32 indexed subscriptionId, uint64 indexed sequence, uint8 reason
+    );
 
     constructor(address admin_, address identityRegistry_, address assetRegistry_, address issuerEligibility_) {
         if (admin_ == address(0)) revert ZeroAdmin();
@@ -477,6 +494,50 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         emit SubscriptionRemediationFlagged(subscription.offeringId, subscriptionId, reason);
     }
 
+    /// @notice Permissionlessly processes the next frozen primary allocation after a Successful outcome.
+    function deliverAllocation(bytes32 offeringId, uint64 sequence) external nonReentrant {
+        Offering storage offering = _getOffering(offeringId);
+        _requireStatus(offeringId, offering.status, OfferingStatus.Successful);
+        if (sequence != offering.deliveredCount) {
+            revert InvalidDeliverySequence(offering.deliveredCount, sequence);
+        }
+        if (sequence >= offering.nextSequence) {
+            revert DeliverySequenceOutOfBounds(sequence, offering.nextSequence);
+        }
+
+        bytes32 subscriptionId = subscriptionIdBySequence[offeringId][sequence];
+        Subscription storage subscription = _subscriptions[subscriptionId];
+        if (subscription.deliveryProcessed) {
+            revert SubscriptionDeliveryAlreadyProcessed(subscriptionId);
+        }
+
+        subscription.deliveryProcessed = true;
+        subscription.deliveredAt = uint64(block.timestamp);
+        offering.deliveredCount = sequence + 1;
+
+        if (subscription.status == SubscriptionStatus.Remediation) {
+            emit AllocationDeliveryRemediation(offeringId, subscriptionId, sequence, subscription.invalidReason);
+            return;
+        }
+        if (subscription.status != SubscriptionStatus.Valid) {
+            revert SubscriptionNotValid(subscriptionId, subscription.status);
+        }
+
+        OfferingConfig storage config = offering.config;
+        if (!IInvestorEligibility(config.investorEligibility).canHold(subscription.destination, config.assetId)) {
+            subscription.status = SubscriptionStatus.Remediation;
+            subscription.invalidReason |= INVALID_DESTINATION_ELIGIBILITY;
+            emit SubscriptionRemediationFlagged(offeringId, subscriptionId, subscription.invalidReason);
+            emit AllocationDeliveryRemediation(offeringId, subscriptionId, sequence, subscription.invalidReason);
+            return;
+        }
+
+        IAllocationEscrow(config.allocationEscrow).releaseAllocation(subscriptionId);
+        emit AllocationDelivered(
+            offeringId, subscriptionId, sequence, subscription.destination, subscription.filledAllocation
+        );
+    }
+
     function _currentInvalidReason(OfferingConfig storage config, Subscription storage subscription)
         private
         view
@@ -591,6 +652,9 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         if (address(revenueToken.recoveryManager()) == address(0)) {
             revenueToken.bindRecoveryManager(config.recoveryManager);
         }
+        if (revenueToken.primaryDistributionEscrow() == address(0)) {
+            revenueToken.bindPrimaryDistributionEscrow(config.allocationEscrow);
+        }
 
         bytes32 minterRole = revenueToken.MINTER_ROLE();
         revenueToken.grantRole(minterRole, address(this));
@@ -663,6 +727,10 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         address boundRecoveryManager = address(revenueToken.recoveryManager());
         if (boundRecoveryManager != address(0) && boundRecoveryManager != config.recoveryManager) {
             revert TokenRecoveryManagerMismatch(config.recoveryManager, boundRecoveryManager);
+        }
+        address boundDistributionEscrow = revenueToken.primaryDistributionEscrow();
+        if (boundDistributionEscrow != address(0) && boundDistributionEscrow != config.allocationEscrow) {
+            revert TokenDistributionEscrowMismatch(config.allocationEscrow, boundDistributionEscrow);
         }
 
         _validateAllocationEscrowBundle(offeringId, config);

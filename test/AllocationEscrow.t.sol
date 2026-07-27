@@ -18,6 +18,13 @@ contract AllocationEscrowTest is Test {
     address private investor = makeAddr("investor");
 
     event TokenDepositConfirmed(bytes32 indexed offeringId, address indexed revenueToken, uint256 finalSupply);
+    event AllocationReleased(
+        bytes32 indexed offeringId,
+        bytes32 indexed subscriptionId,
+        address indexed destination,
+        uint256 amount,
+        uint256 totalReleased
+    );
 
     function setUp() public {
         manager = new AllocationManagerMock();
@@ -169,6 +176,73 @@ contract AllocationEscrowTest is Test {
         vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.UnauthorizedOfferingManager.selector, outsider));
         escrow.tombstone();
     }
+
+    function testSuccessfulReleaseUsesImmutableDestinationAndAmount() public {
+        bytes32 subscriptionId = _prepareAllocation(investor, 6_000 ether);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit AllocationReleased(OFFERING_ID, subscriptionId, investor, 6_000 ether, 6_000 ether);
+        manager.releaseAllocation(escrow, subscriptionId);
+
+        AllocationEscrow.Allocation memory allocation = escrow.getAllocation(subscriptionId);
+        assertTrue(allocation.released);
+        assertEq(escrow.totalReleased(), 6_000 ether);
+        assertEq(token.balanceOf(investor), 6_000 ether);
+        assertEq(token.balanceOf(address(escrow)), FINAL_SUPPLY - 6_000 ether);
+
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.AllocationAlreadyReleased.selector, subscriptionId));
+        manager.releaseAllocation(escrow, subscriptionId);
+    }
+
+    function testReleaseRejectedUnlessSuccessfulAndCalledByManager() public {
+        bytes32 subscriptionId = _prepareAllocation(investor, 1 ether);
+
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.InvalidOfferingStatus.selector, uint8(3), uint8(2)));
+        manager.releaseAllocation(escrow, subscriptionId);
+
+        manager.setOfferingStatus(OFFERING_ID, 3);
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(AllocationEscrow.UnauthorizedOfferingManager.selector, outsider));
+        escrow.releaseAllocation(subscriptionId);
+
+        assertEq(escrow.totalReleased(), 0);
+        assertEq(token.balanceOf(investor), 0);
+    }
+
+    function testTombstonedEscrowCannotRelease() public {
+        bytes32 subscriptionId = _prepareAllocation(investor, 1 ether);
+        manager.tombstone(escrow);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+
+        vm.expectRevert(AllocationEscrow.EscrowTombstoned.selector);
+        manager.releaseAllocation(escrow, subscriptionId);
+
+        assertEq(escrow.totalReleased(), 0);
+        assertEq(token.balanceOf(address(escrow)), FINAL_SUPPLY);
+    }
+
+    function testTokenTransferFailureRollsBackReleaseAccounting() public {
+        bytes32 subscriptionId = _prepareAllocation(investor, 1 ether);
+        manager.setOfferingStatus(OFFERING_ID, 3);
+        token.setDeliveryFailure(true);
+
+        vm.expectRevert(AllocationTokenMock.DeliveryFailed.selector);
+        manager.releaseAllocation(escrow, subscriptionId);
+
+        assertFalse(escrow.getAllocation(subscriptionId).released);
+        assertEq(escrow.totalReleased(), 0);
+        assertEq(token.balanceOf(address(escrow)), FINAL_SUPPLY);
+        assertEq(token.balanceOf(investor), 0);
+    }
+
+    function _prepareAllocation(address destination, uint256 amount) private returns (bytes32 subscriptionId) {
+        token.mint(address(escrow), FINAL_SUPPLY);
+        manager.confirmDeposit(escrow);
+        manager.setOfferingStatus(OFFERING_ID, 2);
+        subscriptionId = keccak256(abi.encode(destination, amount));
+        manager.registerAllocation(escrow, subscriptionId, keccak256("investor-commitment"), destination, amount, 0);
+    }
 }
 
 contract AllocationManagerMock {
@@ -200,10 +274,17 @@ contract AllocationManagerMock {
     function tombstone(AllocationEscrow escrow) external {
         escrow.tombstone();
     }
+
+    function releaseAllocation(AllocationEscrow escrow, bytes32 subscriptionId) external {
+        escrow.releaseAllocation(subscriptionId);
+    }
 }
 
 contract AllocationTokenMock is ERC20 {
     uint256 public immutable finalSupply;
+    bool private _deliveryFailure;
+
+    error DeliveryFailed();
 
     constructor(uint256 finalSupply_) ERC20("Allocation Token", "ALLOC") {
         finalSupply = finalSupply_;
@@ -211,5 +292,14 @@ contract AllocationTokenMock is ERC20 {
 
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
+    }
+
+    function setDeliveryFailure(bool shouldFail) external {
+        _deliveryFailure = shouldFail;
+    }
+
+    function executePrimaryDelivery(address destination, uint256 amount) external {
+        if (_deliveryFailure) revert DeliveryFailed();
+        _transfer(msg.sender, destination, amount);
     }
 }

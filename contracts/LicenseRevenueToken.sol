@@ -31,10 +31,12 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     Lifecycle public lifecycle;
     IRevenueVault public revenueVault;
     IRecoveryManager public recoveryManager;
+    address public primaryDistributionEscrow;
 
     mapping(bytes32 recoveryId => bool executed) public executedRecovery;
 
     bool private _recoveryInProgress;
+    bool private _primaryDeliveryInProgress;
     bool private _checkpointInProgress;
 
     error ZeroIPAssetRegistry();
@@ -62,10 +64,15 @@ contract LicenseRevenueToken is ERC20, AccessControl {
     error InvalidRecoveryId();
     error RecoveryAlreadyExecuted(bytes32 recoveryId);
     error RecoveryParametersNotAuthorized(bytes32 recoveryId, address source, address destination);
+    error ZeroPrimaryDistributionEscrow();
+    error PrimaryDistributionEscrowAlreadyBound(address escrow);
+    error OnlyPrimaryDistributionEscrow(address caller);
 
     event LifecycleChanged(Lifecycle indexed previousLifecycle, Lifecycle indexed newLifecycle);
     event RevenueVaultBound(address indexed vault);
     event RecoveryManagerBound(address indexed manager);
+    event PrimaryDistributionEscrowBound(address indexed escrow);
+    event PrimaryAllocationDelivered(address indexed escrow, address indexed destination, uint256 amount);
     event RecoveryMigrationExecuted(
         bytes32 indexed recoveryId,
         address indexed source,
@@ -129,6 +136,18 @@ contract LicenseRevenueToken is ERC20, AccessControl {
         emit RecoveryManagerBound(manager_);
     }
 
+    /// @notice Permanently binds the sole pre-activation primary-distribution source.
+    function bindPrimaryDistributionEscrow(address escrow_) external onlyRole(TOKEN_CONTROLLER_ROLE) {
+        if (lifecycle != Lifecycle.Created) revert InvalidLifecycle(lifecycle, Lifecycle.Created);
+        if (escrow_ == address(0)) revert ZeroPrimaryDistributionEscrow();
+
+        address currentEscrow = primaryDistributionEscrow;
+        if (currentEscrow != address(0)) revert PrimaryDistributionEscrowAlreadyBound(currentEscrow);
+
+        primaryDistributionEscrow = escrow_;
+        emit PrimaryDistributionEscrowBound(escrow_);
+    }
+
     /// @notice Opens the one-time allocation phase.
     function beginMinting() external onlyRole(TOKEN_CONTROLLER_ROLE) {
         if (lifecycle != Lifecycle.Created) revert InvalidLifecycle(lifecycle, Lifecycle.Created);
@@ -155,6 +174,21 @@ contract LicenseRevenueToken is ERC20, AccessControl {
         if (currentSupply != finalSupply) revert FinalSupplyNotReached(currentSupply, finalSupply);
 
         _setLifecycle(Lifecycle.Activated);
+    }
+
+    /// @notice Delivers a frozen primary allocation without enabling ordinary transfers.
+    /// @dev The bound AllocationEscrow remains the only possible source and validates
+    ///      the immutable subscription destination and amount.
+    function executePrimaryDelivery(address destination, uint256 amount) external {
+        if (msg.sender != primaryDistributionEscrow) revert OnlyPrimaryDistributionEscrow(msg.sender);
+        if (lifecycle != Lifecycle.Minting) revert InvalidLifecycle(lifecycle, Lifecycle.Minting);
+        if (!_canHold(destination)) revert IneligibleInvestor(destination);
+
+        _primaryDeliveryInProgress = true;
+        _update(msg.sender, destination, amount);
+        _primaryDeliveryInProgress = false;
+
+        emit PrimaryAllocationDelivered(msg.sender, destination, amount);
     }
 
     /// @notice Migrates one source account's complete balance under an authorized recovery request.
@@ -194,6 +228,10 @@ contract LicenseRevenueToken is ERC20, AccessControl {
             if (!_canHold(to)) revert IneligibleInvestor(to);
         } else if (to == address(0)) {
             revert ArbitraryBurnDisabled();
+        } else if (_primaryDeliveryInProgress) {
+            if (from != primaryDistributionEscrow) revert OnlyPrimaryDistributionEscrow(from);
+            if (lifecycle != Lifecycle.Minting) revert InvalidLifecycle(lifecycle, Lifecycle.Minting);
+            if (!_canHold(to)) revert IneligibleInvestor(to);
         } else if (!_recoveryInProgress) {
             if (lifecycle != Lifecycle.Activated) revert TransfersNotActive();
             if (!_canHold(from)) revert IneligibleInvestor(from);

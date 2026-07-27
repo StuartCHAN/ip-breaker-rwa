@@ -14,11 +14,13 @@ interface IRevenueTokenSupply is IERC20 {
     function finalSupply() external view returns (uint256);
 
     function totalSupply() external view returns (uint256);
+
+    function executePrimaryDelivery(address destination, uint256 amount) external;
 }
 
 /// @title AllocationEscrow
 /// @notice One-offering custody boundary for pre-minted primary allocations.
-/// @dev Phase 3.2-2B2 records custody and immutable allocations. Token release is intentionally absent.
+/// @dev Releases only immutable allocations authorized by the bound OfferingManager after success.
 contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
     struct Allocation {
         bytes32 investorCommitment;
@@ -26,10 +28,12 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         uint256 amount;
         uint64 sequence;
         bool exists;
+        bool released;
     }
 
     uint8 private constant STATUS_DRAFT = 1;
     uint8 private constant STATUS_OPEN = 2;
+    uint8 private constant STATUS_SUCCESSFUL = 3;
 
     address public immutable offeringManager;
     bytes32 public immutable offeringId;
@@ -66,6 +70,9 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
     error AllocationExceedsFinalSupply(uint256 requestedTotal, uint256 finalSupply);
     error AlreadyTombstoned();
     error EscrowTombstoned();
+    error AllocationNotFound(bytes32 subscriptionId);
+    error AllocationAlreadyReleased(bytes32 subscriptionId);
+    error ReleasedAmountExceedsAllocated(uint256 releasedTotal, uint256 allocatedTotal);
 
     event TokenDepositConfirmed(bytes32 indexed offeringId, address indexed revenueToken, uint256 finalSupply);
     event AllocationRegistered(
@@ -79,6 +86,13 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
     );
     event AllocationEscrowTombstoned(
         bytes32 indexed offeringId, address indexed revenueToken, uint256 remainingBalance
+    );
+    event AllocationReleased(
+        bytes32 indexed offeringId,
+        bytes32 indexed subscriptionId,
+        address indexed destination,
+        uint256 amount,
+        uint256 totalReleased
     );
 
     modifier onlyOfferingManager() {
@@ -133,7 +147,7 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
     }
 
     /// @notice Stores one immutable primary-allocation commitment.
-    /// @dev No Token moves in this phase and no release entry point exists.
+    /// @dev No Token moves while the offering is Open.
     function registerAllocation(
         bytes32 subscriptionId,
         bytes32 investorCommitment,
@@ -182,7 +196,8 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
             destination: destination,
             amount: amount,
             sequence: sequence,
-            exists: true
+            exists: true,
+            released: false
         });
         allocationHash[subscriptionId] = recordHash;
         totalAllocated = requestedTotal;
@@ -197,6 +212,32 @@ contract AllocationEscrow is IAllocationEscrow, ReentrancyGuard {
         if (tombstoned) revert AlreadyTombstoned();
         tombstoned = true;
         emit AllocationEscrowTombstoned(offeringId, revenueToken, IERC20(revenueToken).balanceOf(address(this)));
+    }
+
+    /// @notice Releases exactly one immutable subscription allocation after a Successful outcome.
+    function releaseAllocation(bytes32 subscriptionId) external onlyOfferingManager nonReentrant {
+        if (tombstoned) revert EscrowTombstoned();
+        if (!depositConfirmed) revert DepositNotConfirmed();
+
+        uint8 status = IOfferingManagerStatus(offeringManager).getOfferingStatus(offeringId);
+        if (status != STATUS_SUCCESSFUL) {
+            revert InvalidOfferingStatus(STATUS_SUCCESSFUL, status);
+        }
+
+        Allocation storage allocation = _allocations[subscriptionId];
+        if (!allocation.exists) revert AllocationNotFound(subscriptionId);
+        if (allocation.released) revert AllocationAlreadyReleased(subscriptionId);
+
+        uint256 releasedTotal = totalReleased + allocation.amount;
+        if (releasedTotal > totalAllocated || releasedTotal > finalSupply) {
+            revert ReleasedAmountExceedsAllocated(releasedTotal, totalAllocated);
+        }
+
+        allocation.released = true;
+        totalReleased = releasedTotal;
+        IRevenueTokenSupply(revenueToken).executePrimaryDelivery(allocation.destination, allocation.amount);
+
+        emit AllocationReleased(offeringId, subscriptionId, allocation.destination, allocation.amount, releasedTotal);
     }
 
     function getAllocation(bytes32 subscriptionId) external view returns (Allocation memory) {
