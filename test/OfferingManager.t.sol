@@ -711,6 +711,182 @@ contract OfferingManagerTest is Test {
         assertEq(offering.nextSequence, 0);
     }
 
+    function testReconciliationRejectedBeforeFundingClose() public {
+        bytes32 offeringId = _openOffering();
+        _prepareInvestor(investor, destination);
+        vm.prank(investor);
+        manager.subscribe(offeringId, 1 ether, 0, destination, keccak256("reconcile-too-early"));
+
+        vm.prank(outsider);
+        vm.expectRevert();
+        manager.reconcileSubscription(offeringId, 0);
+
+        assertEq(manager.getOffering(offeringId).reconciledCount, 0);
+    }
+
+    function testPermissionlessReconciliationFullValidOfferingBecomesSuccessful() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        OfferingManager.Offering memory beforeReconciliation = manager.getOffering(offeringId);
+        uint256 usdcBalance = usdc.balanceOf(address(offeringEscrow));
+        uint256 tokenBalance = revenueToken.balanceOf(address(allocationEscrow));
+        vm.warp(beforeReconciliation.config.closesAt);
+
+        vm.prank(outsider);
+        manager.reconcileSubscription(offeringId, 0);
+
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        bytes32 subscriptionId = manager.subscriptionIdBySequence(offeringId, 0);
+        OfferingManager.Subscription memory subscription = manager.getSubscription(subscriptionId);
+        assertEq(uint256(offering.status), uint256(OfferingManager.OfferingStatus.Successful));
+        assertEq(uint256(subscription.status), uint256(OfferingManager.SubscriptionStatus.Valid));
+        assertEq(offering.soldSupply, FINAL_SUPPLY);
+        assertEq(offering.validSoldSupply, FINAL_SUPPLY);
+        assertEq(offering.validCommittedUSDC, offering.committedUSDC);
+        assertEq(usdc.balanceOf(address(offeringEscrow)), usdcBalance);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), tokenBalance);
+        assertEq(allocationEscrow.totalReleased(), 0);
+    }
+
+    function testReconciliationMustProcessInSequenceAndCannotRepeat() public {
+        bytes32 offeringId = _openOffering();
+        _prepareInvestor(investor, destination);
+        vm.startPrank(investor);
+        manager.subscribe(offeringId, 5_000 ether, 0, destination, keccak256("sequence-0"));
+        manager.subscribe(offeringId, 5_000 ether, 0, destination, keccak256("sequence-1"));
+        vm.stopPrank();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(OfferingManager.InvalidReconciliationSequence.selector, uint64(0), uint64(1))
+        );
+        manager.reconcileSubscription(offeringId, 1);
+
+        manager.reconcileSubscription(offeringId, 0);
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Open));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(OfferingManager.InvalidReconciliationSequence.selector, uint64(1), uint64(0))
+        );
+        manager.reconcileSubscription(offeringId, 0);
+
+        manager.reconcileSubscription(offeringId, 1);
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Successful));
+    }
+
+    function testRevokedPayerBeforeReconciliationMakesOfferingFailed() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        identityRegistry.setLicensee(investor, false);
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+
+        manager.reconcileSubscription(offeringId, 0);
+
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        OfferingManager.Subscription memory subscription =
+            manager.getSubscription(manager.subscriptionIdBySequence(offeringId, 0));
+        assertEq(uint256(offering.status), uint256(OfferingManager.OfferingStatus.Failed));
+        assertEq(offering.soldSupply, FINAL_SUPPLY);
+        assertEq(offering.validSoldSupply, 0);
+        assertEq(offering.validCommittedUSDC, 0);
+        assertEq(subscription.invalidReason, manager.INVALID_PAYER_IDENTITY());
+    }
+
+    function testDestinationOrPayerEligibilityLossMakesSubscriptionInvalid() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        investorEligibility.setEligible(destination, ASSET_ID, false);
+        investorEligibility.setEligible(investor, ASSET_ID, false);
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+
+        manager.reconcileSubscription(offeringId, 0);
+
+        OfferingManager.Subscription memory subscription =
+            manager.getSubscription(manager.subscriptionIdBySequence(offeringId, 0));
+        uint8 expectedReason = manager.INVALID_PAYER_ELIGIBILITY() | manager.INVALID_DESTINATION_ELIGIBILITY();
+        assertEq(subscription.invalidReason, expectedReason);
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Failed));
+    }
+
+    function testIncompleteReconciliationCannotResolveOutcome() public {
+        bytes32 offeringId = _openOffering();
+        _prepareInvestor(investor, destination);
+        vm.startPrank(investor);
+        manager.subscribe(offeringId, 5_000 ether, 0, destination, keccak256("incomplete-0"));
+        manager.subscribe(offeringId, 5_000 ether, 0, destination, keccak256("incomplete-1"));
+        vm.stopPrank();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+
+        manager.reconcileSubscription(offeringId, 0);
+        vm.expectRevert(abi.encodeWithSelector(OfferingManager.ReconciliationIncomplete.selector, uint64(1), uint64(2)));
+        manager.resolveOfferingOutcome(offeringId);
+
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        assertEq(uint256(offering.status), uint256(OfferingManager.OfferingStatus.Open));
+        assertEq(offering.validSoldSupply, 5_000 ether);
+        assertEq(offering.soldSupply, FINAL_SUPPLY);
+    }
+
+    function testUndersubscribedOfferingBecomesFailedAfterCompleteReconciliation() public {
+        bytes32 offeringId = _openOffering();
+        _prepareInvestor(investor, destination);
+        vm.prank(investor);
+        manager.subscribe(offeringId, 9_000 ether, 0, destination, keccak256("undersubscribed"));
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+
+        manager.reconcileSubscription(offeringId, 0);
+
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        assertEq(offering.validSoldSupply, 9_000 ether);
+        assertEq(uint256(offering.status), uint256(OfferingManager.OfferingStatus.Failed));
+    }
+
+    function testSuccessfulOutcomeIsIrreversibleAndLateFailureUsesRemediation() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.reconcileSubscription(offeringId, 0);
+        bytes32 subscriptionId = manager.subscriptionIdBySequence(offeringId, 0);
+        uint256 validSupply = manager.getOffering(offeringId).validSoldSupply;
+
+        identityRegistry.setLicensee(investor, false);
+        vm.prank(outsider);
+        manager.flagSubscriptionRemediation(subscriptionId);
+
+        OfferingManager.Subscription memory subscription = manager.getSubscription(subscriptionId);
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        assertEq(uint256(subscription.status), uint256(OfferingManager.SubscriptionStatus.Remediation));
+        assertEq(uint256(offering.status), uint256(OfferingManager.OfferingStatus.Successful));
+        assertEq(offering.validSoldSupply, validSupply);
+
+        vm.expectRevert();
+        manager.resolveOfferingOutcome(offeringId);
+        vm.expectRevert();
+        manager.reconcileSubscription(offeringId, 0);
+    }
+
+    function testTerminalFailedOutcomeIsIrreversible() public {
+        bytes32 offeringId = _openOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        manager.resolveOfferingOutcome(offeringId);
+
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Failed));
+        vm.expectRevert();
+        manager.resolveOfferingOutcome(offeringId);
+    }
+
+    function testReconciliationDependencyFailureDoesNotConsumeState() public {
+        bytes32 offeringId = _subscribeFullOffering();
+        vm.warp(manager.getOffering(offeringId).config.closesAt);
+        investorEligibility.setReconciliationFailure(true);
+
+        vm.expectRevert(OfferingInvestorEligibilityMock.EligibilityCheckFailed.selector);
+        manager.reconcileSubscription(offeringId, 0);
+
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        OfferingManager.Subscription memory subscription =
+            manager.getSubscription(manager.subscriptionIdBySequence(offeringId, 0));
+        assertEq(offering.reconciledCount, 0);
+        assertEq(offering.validSoldSupply, 0);
+        assertEq(uint256(subscription.status), uint256(OfferingManager.SubscriptionStatus.Committed));
+    }
+
     function testInvalidAllocationLotRejectedAtCreation() public {
         OfferingManager.OfferingConfig memory config = _validConfig();
         config.allocationLot = 3 ether;
@@ -772,6 +948,13 @@ contract OfferingManagerTest is Test {
         vm.warp(config.opensAt);
         vm.prank(operator);
         manager.openOffering(offeringId);
+    }
+
+    function _subscribeFullOffering() private returns (bytes32 offeringId) {
+        offeringId = _openOffering();
+        _prepareInvestor(investor, destination);
+        vm.prank(investor);
+        manager.subscribe(offeringId, FINAL_SUPPLY, FINAL_SUPPLY, destination, keccak256("full"));
     }
 
     function _assertOpenRolledBack(bytes32 offeringId) private view {
@@ -892,12 +1075,20 @@ contract SixDecimalUSDCMock is ERC20 {
 
 contract OfferingInvestorEligibilityMock is IInvestorEligibility {
     mapping(uint256 assetId => mapping(address account => bool eligible)) private _eligibility;
+    bool private _reconciliationFailure;
+
+    error EligibilityCheckFailed();
 
     function setEligible(address account, uint256 assetId, bool eligible) external {
         _eligibility[assetId][account] = eligible;
     }
 
+    function setReconciliationFailure(bool shouldFail) external {
+        _reconciliationFailure = shouldFail;
+    }
+
     function canHold(address account, uint256 assetId) external view returns (bool) {
+        if (_reconciliationFailure) revert EligibilityCheckFailed();
         return _eligibility[assetId][account];
     }
 }

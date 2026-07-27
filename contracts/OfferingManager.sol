@@ -31,6 +31,14 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         Finalized
     }
 
+    enum SubscriptionStatus {
+        None,
+        Committed,
+        Valid,
+        Invalid,
+        Remediation
+    }
+
     struct OfferingConfig {
         uint256 assetId;
         address issuer;
@@ -62,12 +70,16 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         uint256 targetUSDC;
         uint256 soldSupply;
         uint256 committedUSDC;
+        uint256 validSoldSupply;
+        uint256 validCommittedUSDC;
         uint64 nextSequence;
+        uint64 reconciledCount;
         OfferingConfig config;
     }
 
     struct Subscription {
         bytes32 subscriptionId;
+        bytes32 offeringId;
         bytes32 paymentReference;
         address payer;
         address destination;
@@ -76,12 +88,18 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         uint256 usdcAmount;
         uint64 sequence;
         uint64 subscribedAt;
+        uint64 reconciledAt;
+        uint8 invalidReason;
+        SubscriptionStatus status;
     }
 
     bytes32 public constant OFFERING_OPERATOR_ROLE = keccak256("OFFERING_OPERATOR");
     uint8 public constant REQUIRED_USDC_DECIMALS = 6;
     uint256 public constant TOKEN_UNIT = 1e18;
     uint16 public constant MAX_BPS = 10_000;
+    uint8 public constant INVALID_PAYER_IDENTITY = 1 << 0;
+    uint8 public constant INVALID_PAYER_ELIGIBILITY = 1 << 1;
+    uint8 public constant INVALID_DESTINATION_ELIGIBILITY = 1 << 2;
 
     IIdentityRegistry public immutable identityRegistry;
     IIPAssetRegistry public immutable assetRegistry;
@@ -90,6 +108,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     mapping(bytes32 offeringId => Offering offering) private _offerings;
     mapping(address creator => uint256 nonce) public creatorNonce;
     mapping(bytes32 subscriptionId => Subscription subscription) private _subscriptions;
+    mapping(bytes32 offeringId => mapping(uint64 sequence => bytes32 subscriptionId)) public subscriptionIdBySequence;
     mapping(bytes32 offeringId => mapping(bytes32 paymentReference => bool used)) public paymentReferenceUsed;
 
     error ZeroAdmin();
@@ -156,6 +175,13 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
     error SubscriptionAlreadyExists(bytes32 subscriptionId);
     error AllocationAccountingMismatch(uint256 expected, uint256 actual);
     error ContributionAccountingMismatch(uint256 expected, uint256 actual);
+    error ReconciliationNotStarted(uint256 currentTime, uint64 closesAt);
+    error InvalidReconciliationSequence(uint64 expected, uint64 actual);
+    error ReconciliationSequenceOutOfBounds(uint64 sequence, uint64 subscriptionCount);
+    error SubscriptionAlreadyReconciled(bytes32 subscriptionId);
+    error ReconciliationIncomplete(uint64 reconciledCount, uint64 subscriptionCount);
+    error NoRemediationRequired(bytes32 subscriptionId);
+    error SubscriptionNotValid(bytes32 subscriptionId, SubscriptionStatus status);
 
     event OfferingCreated(
         bytes32 indexed offeringId,
@@ -183,6 +209,18 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         bytes32 paymentReference,
         uint64 sequence
     );
+    event SubscriptionReconciled(
+        bytes32 indexed offeringId,
+        bytes32 indexed subscriptionId,
+        uint64 indexed sequence,
+        SubscriptionStatus status,
+        uint8 invalidReason,
+        uint256 validSoldSupply,
+        uint256 validCommittedUSDC
+    );
+    event SubscriptionRemediationFlagged(bytes32 indexed offeringId, bytes32 indexed subscriptionId, uint8 reason);
+    event OfferingSuccessful(bytes32 indexed offeringId, uint256 validSoldSupply, uint256 validCommittedUSDC);
+    event OfferingFailed(bytes32 indexed offeringId, uint256 validSoldSupply, uint256 validCommittedUSDC);
 
     constructor(address admin_, address identityRegistry_, address assetRegistry_, address issuerEligibility_) {
         if (admin_ == address(0)) revert ZeroAdmin();
@@ -342,23 +380,132 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
             revert SubscriptionAlreadyExists(subscriptionId);
         }
 
-        Subscription memory acceptedSubscription = Subscription({
-            subscriptionId: subscriptionId,
-            paymentReference: paymentReference,
-            payer: msg.sender,
-            destination: destination,
-            requestedAllocation: requestedAllocation,
-            filledAllocation: filledAllocation,
-            usdcAmount: requiredUSDC,
-            sequence: sequence,
-            subscribedAt: uint64(block.timestamp)
-        });
+        Subscription memory acceptedSubscription;
+        acceptedSubscription.subscriptionId = subscriptionId;
+        acceptedSubscription.offeringId = offeringId;
+        acceptedSubscription.paymentReference = paymentReference;
+        acceptedSubscription.payer = msg.sender;
+        acceptedSubscription.destination = destination;
+        acceptedSubscription.requestedAllocation = requestedAllocation;
+        acceptedSubscription.filledAllocation = filledAllocation;
+        acceptedSubscription.usdcAmount = requiredUSDC;
+        acceptedSubscription.sequence = sequence;
+        acceptedSubscription.subscribedAt = uint64(block.timestamp);
+        acceptedSubscription.status = SubscriptionStatus.Committed;
         _recordSubscriptionEscrows(config, acceptedSubscription);
         _commitSubscription(offeringId, offering, acceptedSubscription);
     }
 
     function getSubscription(bytes32 subscriptionId) external view returns (Subscription memory) {
         return _subscriptions[subscriptionId];
+    }
+
+    /// @notice Revalidates exactly the next committed subscription after Funding closes.
+    function reconcileSubscription(bytes32 offeringId, uint64 sequence) external nonReentrant {
+        Offering storage offering = _getOffering(offeringId);
+        _requireStatus(offeringId, offering.status, OfferingStatus.Open);
+        if (block.timestamp < offering.config.closesAt) {
+            revert ReconciliationNotStarted(block.timestamp, offering.config.closesAt);
+        }
+        if (sequence != offering.reconciledCount) {
+            revert InvalidReconciliationSequence(offering.reconciledCount, sequence);
+        }
+        if (sequence >= offering.nextSequence) {
+            revert ReconciliationSequenceOutOfBounds(sequence, offering.nextSequence);
+        }
+
+        bytes32 subscriptionId = subscriptionIdBySequence[offeringId][sequence];
+        Subscription storage subscription = _subscriptions[subscriptionId];
+        if (subscription.status != SubscriptionStatus.Committed) {
+            revert SubscriptionAlreadyReconciled(subscriptionId);
+        }
+
+        uint8 invalidReason = _currentInvalidReason(offering.config, subscription);
+        if (invalidReason == 0) {
+            subscription.status = SubscriptionStatus.Valid;
+            offering.validSoldSupply += subscription.filledAllocation;
+            offering.validCommittedUSDC += subscription.usdcAmount;
+        } else {
+            subscription.status = SubscriptionStatus.Invalid;
+            subscription.invalidReason = invalidReason;
+        }
+        subscription.reconciledAt = uint64(block.timestamp);
+        offering.reconciledCount = sequence + 1;
+
+        emit SubscriptionReconciled(
+            offeringId,
+            subscriptionId,
+            sequence,
+            subscription.status,
+            invalidReason,
+            offering.validSoldSupply,
+            offering.validCommittedUSDC
+        );
+
+        if (offering.reconciledCount == offering.nextSequence) {
+            _resolveOfferingOutcome(offeringId, offering);
+        }
+    }
+
+    /// @notice Resolves an empty or fully reconciled offering after Funding closes.
+    function resolveOfferingOutcome(bytes32 offeringId) external {
+        Offering storage offering = _getOffering(offeringId);
+        _requireStatus(offeringId, offering.status, OfferingStatus.Open);
+        if (block.timestamp < offering.config.closesAt) {
+            revert ReconciliationNotStarted(block.timestamp, offering.config.closesAt);
+        }
+        if (offering.reconciledCount != offering.nextSequence) {
+            revert ReconciliationIncomplete(offering.reconciledCount, offering.nextSequence);
+        }
+        _resolveOfferingOutcome(offeringId, offering);
+    }
+
+    /// @notice Flags post-success compliance deterioration without changing frozen economics.
+    function flagSubscriptionRemediation(bytes32 subscriptionId) external nonReentrant {
+        Subscription storage subscription = _subscriptions[subscriptionId];
+        if (subscription.status != SubscriptionStatus.Valid) {
+            revert SubscriptionNotValid(subscriptionId, subscription.status);
+        }
+        Offering storage offering = _getOffering(subscription.offeringId);
+        _requireStatus(subscription.offeringId, offering.status, OfferingStatus.Successful);
+
+        uint8 reason = _currentInvalidReason(offering.config, subscription);
+        if (reason == 0) revert NoRemediationRequired(subscriptionId);
+
+        subscription.status = SubscriptionStatus.Remediation;
+        subscription.invalidReason = reason;
+        emit SubscriptionRemediationFlagged(subscription.offeringId, subscriptionId, reason);
+    }
+
+    function _currentInvalidReason(OfferingConfig storage config, Subscription storage subscription)
+        private
+        view
+        returns (uint8 reason)
+    {
+        uint256 licenseeRole = identityRegistry.ROLE_LICENSEE();
+        if (!identityRegistry.hasBusinessRole(subscription.payer, licenseeRole)) {
+            reason |= INVALID_PAYER_IDENTITY;
+        }
+
+        IInvestorEligibility eligibility = IInvestorEligibility(config.investorEligibility);
+        if (!eligibility.canHold(subscription.payer, config.assetId)) {
+            reason |= INVALID_PAYER_ELIGIBILITY;
+        }
+        if (!eligibility.canHold(subscription.destination, config.assetId)) {
+            reason |= INVALID_DESTINATION_ELIGIBILITY;
+        }
+    }
+
+    function _resolveOfferingOutcome(bytes32 offeringId, Offering storage offering) private {
+        if (offering.validSoldSupply == offering.config.finalSupply) {
+            offering.status = OfferingStatus.Successful;
+            emit OfferingStatusChanged(offeringId, OfferingStatus.Open, OfferingStatus.Successful);
+            emit OfferingSuccessful(offeringId, offering.validSoldSupply, offering.validCommittedUSDC);
+        } else {
+            offering.status = OfferingStatus.Failed;
+            emit OfferingStatusChanged(offeringId, OfferingStatus.Open, OfferingStatus.Failed);
+            emit OfferingFailed(offeringId, offering.validSoldSupply, offering.validCommittedUSDC);
+        }
     }
 
     function _emitSubscriptionAccepted(bytes32 offeringId, Subscription storage subscription) private {
@@ -412,6 +559,7 @@ contract OfferingManager is AccessControl, ReentrancyGuard {
         private
     {
         _subscriptions[subscription.subscriptionId] = subscription;
+        subscriptionIdBySequence[offeringId][subscription.sequence] = subscription.subscriptionId;
         paymentReferenceUsed[offeringId][subscription.paymentReference] = true;
         offering.soldSupply += subscription.filledAllocation;
         offering.committedUSDC += subscription.usdcAmount;
