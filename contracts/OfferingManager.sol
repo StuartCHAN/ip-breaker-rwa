@@ -5,6 +5,8 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+import {LicenseRevenueToken} from "./LicenseRevenueToken.sol";
+import {IAllocationEscrow} from "./interfaces/IAllocationEscrow.sol";
 import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
 import {IIPAssetRegistry} from "./interfaces/IIPAssetRegistry.sol";
 
@@ -15,7 +17,7 @@ interface IIssuerEligibility {
 
 /// @title OfferingManager
 /// @notice Non-custodial core state machine for immutable primary-offering configuration.
-/// @dev Phase 3.2-2A deliberately excludes Token, Vault, AllocationEscrow, and USDC state changes.
+/// @dev Phase 3.2-2B atomically prepares and escrows the frozen token supply when opening.
 contract OfferingManager is AccessControl {
     enum OfferingStatus {
         None,
@@ -92,6 +94,23 @@ contract OfferingManager is AccessControl {
     error OfferingNotOpenYet(uint256 currentTime, uint64 opensAt);
     error OfferingWindowClosed(uint256 currentTime, uint64 closesAt);
     error AssetOwnershipChanged(address expectedOwner, address currentOwner);
+    error TokenRegistryMismatch(address expected, address actual);
+    error TokenAssetMismatch(uint256 expected, uint256 actual);
+    error TokenFinalSupplyMismatch(uint256 expected, uint256 actual);
+    error TokenEligibilityMismatch(address expected, address actual);
+    error TokenVaultMismatch(address expected, address actual);
+    error TokenRecoveryManagerMismatch(address expected, address actual);
+    error OfferingManagerNotTokenController(address revenueToken);
+    error TokenNotReadyForMinting(uint8 lifecycle);
+    error InitialTokenSupplyNotZero(uint256 actualSupply);
+    error InitialEscrowBalanceNotZero(uint256 actualBalance);
+    error TokenSupplyInvariantViolation(uint256 expected, uint256 actual);
+    error EscrowCustodyInvariantViolation(uint256 expected, uint256 actual);
+    error EscrowCustodyNotConfirmed(bytes32 offeringId);
+    error EscrowManagerMismatch(address expected, address actual);
+    error EscrowOfferingMismatch(bytes32 expected, bytes32 actual);
+    error EscrowTokenMismatch(address expected, address actual);
+    error EscrowFinalSupplyMismatch(uint256 expected, uint256 actual);
 
     event OfferingCreated(
         bytes32 indexed offeringId,
@@ -168,8 +187,7 @@ contract OfferingManager is AccessControl {
         emit OfferingStatusChanged(offeringId, OfferingStatus.None, OfferingStatus.Draft);
     }
 
-    /// @notice Opens a Draft after revalidating its frozen owner, issuer, dependencies, and time window.
-    /// @dev Phase 3.2-2A changes Manager state only; pre-mint custody is integrated in Phase 3.2-2B.
+    /// @notice Opens a Draft after atomically minting its frozen supply into allocation custody.
     function openOffering(bytes32 offeringId) external onlyRole(OFFERING_OPERATOR_ROLE) {
         Offering storage offering = _getOffering(offeringId);
         _requireStatus(offeringId, offering.status, OfferingStatus.Draft);
@@ -190,6 +208,8 @@ contract OfferingManager is AccessControl {
         if (!issuerEligibility.isEligibleIssuer(config.issuer)) revert InvalidIssuer(config.issuer);
         _validateDependencyContracts(config);
 
+        _prepareTokenCustody(offeringId, config);
+
         offering.status = OfferingStatus.Open;
         offering.openedAt = uint64(block.timestamp);
 
@@ -207,6 +227,114 @@ contract OfferingManager is AccessControl {
         OfferingStatus status = _offerings[offeringId].status;
         if (status == OfferingStatus.None) revert OfferingNotFound(offeringId);
         return status;
+    }
+
+    function _prepareTokenCustody(bytes32 offeringId, OfferingConfig storage config) private {
+        LicenseRevenueToken revenueToken = LicenseRevenueToken(config.revenueToken);
+        _validateTokenBundle(offeringId, revenueToken, config);
+
+        // Bind only the dependencies already frozen in the Draft. If any later
+        // preparation step fails, these bindings roll back with the transaction.
+        if (address(revenueToken.revenueVault()) == address(0)) {
+            revenueToken.bindRevenueVault(config.revenueVault);
+        }
+        if (address(revenueToken.recoveryManager()) == address(0)) {
+            revenueToken.bindRecoveryManager(config.recoveryManager);
+        }
+
+        bytes32 minterRole = revenueToken.MINTER_ROLE();
+        revenueToken.grantRole(minterRole, address(this));
+        revenueToken.beginMinting();
+        revenueToken.mint(config.allocationEscrow, config.finalSupply);
+        revenueToken.revokeRole(minterRole, address(this));
+
+        IAllocationEscrow allocationEscrow = IAllocationEscrow(config.allocationEscrow);
+        allocationEscrow.confirmTokenDeposit();
+
+        uint256 actualSupply = revenueToken.totalSupply();
+        if (actualSupply != config.finalSupply) {
+            revert TokenSupplyInvariantViolation(config.finalSupply, actualSupply);
+        }
+
+        uint256 escrowBalance = revenueToken.balanceOf(config.allocationEscrow);
+        if (escrowBalance != config.finalSupply) {
+            revert EscrowCustodyInvariantViolation(config.finalSupply, escrowBalance);
+        }
+
+        if (!allocationEscrow.depositConfirmed()) {
+            revert EscrowCustodyNotConfirmed(offeringId);
+        }
+    }
+
+    function _validateTokenBundle(bytes32 offeringId, LicenseRevenueToken revenueToken, OfferingConfig storage config)
+        private
+        view
+    {
+        address tokenRegistry = address(revenueToken.ipAssetRegistry());
+        if (tokenRegistry != address(assetRegistry)) {
+            revert TokenRegistryMismatch(address(assetRegistry), tokenRegistry);
+        }
+
+        uint256 tokenAssetId = revenueToken.assetId();
+        if (tokenAssetId != config.assetId) {
+            revert TokenAssetMismatch(config.assetId, tokenAssetId);
+        }
+
+        uint256 tokenFinalSupply = revenueToken.finalSupply();
+        if (tokenFinalSupply != config.finalSupply) {
+            revert TokenFinalSupplyMismatch(config.finalSupply, tokenFinalSupply);
+        }
+
+        address tokenEligibility = address(revenueToken.eligibilityPolicy());
+        if (tokenEligibility != config.investorEligibility) {
+            revert TokenEligibilityMismatch(config.investorEligibility, tokenEligibility);
+        }
+
+        if (!revenueToken.hasRole(revenueToken.TOKEN_CONTROLLER_ROLE(), address(this))) {
+            revert OfferingManagerNotTokenController(config.revenueToken);
+        }
+
+        LicenseRevenueToken.Lifecycle lifecycle = revenueToken.lifecycle();
+        if (lifecycle != LicenseRevenueToken.Lifecycle.Created) {
+            revert TokenNotReadyForMinting(uint8(lifecycle));
+        }
+
+        uint256 actualSupply = revenueToken.totalSupply();
+        if (actualSupply != 0) revert InitialTokenSupplyNotZero(actualSupply);
+
+        uint256 escrowBalance = revenueToken.balanceOf(config.allocationEscrow);
+        if (escrowBalance != 0) revert InitialEscrowBalanceNotZero(escrowBalance);
+
+        address boundVault = address(revenueToken.revenueVault());
+        if (boundVault != address(0) && boundVault != config.revenueVault) {
+            revert TokenVaultMismatch(config.revenueVault, boundVault);
+        }
+
+        address boundRecoveryManager = address(revenueToken.recoveryManager());
+        if (boundRecoveryManager != address(0) && boundRecoveryManager != config.recoveryManager) {
+            revert TokenRecoveryManagerMismatch(config.recoveryManager, boundRecoveryManager);
+        }
+
+        IAllocationEscrow allocationEscrow = IAllocationEscrow(config.allocationEscrow);
+        address escrowManager = allocationEscrow.offeringManager();
+        if (escrowManager != address(this)) {
+            revert EscrowManagerMismatch(address(this), escrowManager);
+        }
+
+        bytes32 escrowOfferingId = allocationEscrow.offeringId();
+        if (escrowOfferingId != offeringId) {
+            revert EscrowOfferingMismatch(offeringId, escrowOfferingId);
+        }
+
+        address escrowToken = allocationEscrow.revenueToken();
+        if (escrowToken != config.revenueToken) {
+            revert EscrowTokenMismatch(config.revenueToken, escrowToken);
+        }
+
+        uint256 escrowFinalSupply = allocationEscrow.finalSupply();
+        if (escrowFinalSupply != config.finalSupply) {
+            revert EscrowFinalSupplyMismatch(config.finalSupply, escrowFinalSupply);
+        }
     }
 
     function _validateCreationAuthority(uint256 assetId, address caller) private view {

@@ -3,10 +3,16 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {OfferingManager, IIssuerEligibility} from "../contracts/OfferingManager.sol";
+import {LicenseRevenueToken} from "../contracts/LicenseRevenueToken.sol";
+import {IAllocationEscrow} from "../contracts/interfaces/IAllocationEscrow.sol";
 import {IIdentityRegistry} from "../contracts/interfaces/IIdentityRegistry.sol";
+import {IInvestorEligibility} from "../contracts/interfaces/IInvestorEligibility.sol";
 import {IIPAssetRegistry} from "../contracts/interfaces/IIPAssetRegistry.sol";
+import {IRecoveryManager} from "../contracts/interfaces/IRecoveryManager.sol";
+import {IRevenueVault} from "../contracts/interfaces/IRevenueVault.sol";
 
 contract OfferingManagerTest is Test {
     OfferingManager private manager;
@@ -26,12 +32,12 @@ contract OfferingManagerTest is Test {
     uint256 private constant FINAL_SUPPLY = 10_000 ether;
     uint256 private constant PRICE = 1_000_000;
 
-    DependencyMock private revenueToken;
-    DependencyMock private revenueVault;
-    DependencyMock private allocationEscrow;
+    LicenseRevenueToken private revenueToken;
+    OfferingRevenueVaultMock private revenueVault;
+    AllocationEscrowMock private allocationEscrow;
     DependencyMock private offeringEscrow;
-    DependencyMock private investorEligibility;
-    DependencyMock private recoveryManager;
+    OfferingInvestorEligibilityMock private investorEligibility;
+    OfferingRecoveryManagerMock private recoveryManager;
 
     event OfferingCreated(
         bytes32 indexed offeringId,
@@ -57,12 +63,9 @@ contract OfferingManagerTest is Test {
         issuerEligibility = new IssuerEligibilityMock();
         usdc = new SixDecimalUSDCMock();
 
-        revenueToken = new DependencyMock();
-        revenueVault = new DependencyMock();
-        allocationEscrow = new DependencyMock();
         offeringEscrow = new DependencyMock();
-        investorEligibility = new DependencyMock();
-        recoveryManager = new DependencyMock();
+        investorEligibility = new OfferingInvestorEligibilityMock();
+        recoveryManager = new OfferingRecoveryManagerMock();
 
         manager =
             new OfferingManager(admin, address(identityRegistry), address(assetRegistry), address(issuerEligibility));
@@ -73,6 +76,32 @@ contract OfferingManagerTest is Test {
         assetRegistry.setAsset(ASSET_ID, assetOwner);
         identityRegistry.setAssetOwner(assetOwner, true);
         issuerEligibility.setEligible(issuer, true);
+
+        revenueToken = new LicenseRevenueToken(
+            "Offering Revenue",
+            "OFFREV",
+            address(assetRegistry),
+            ASSET_ID,
+            FINAL_SUPPLY,
+            address(investorEligibility),
+            address(manager)
+        );
+        revenueVault = new OfferingRevenueVaultMock(address(revenueToken));
+        bytes32 expectedOfferingId = keccak256(
+            abi.encode(
+                block.chainid,
+                address(manager),
+                address(assetRegistry),
+                ASSET_ID,
+                assetOwner,
+                issuer,
+                uint256(0),
+                keccak256("offering-terms")
+            )
+        );
+        allocationEscrow =
+            new AllocationEscrowMock(address(manager), expectedOfferingId, address(revenueToken), FINAL_SUPPLY);
+        investorEligibility.setEligible(address(allocationEscrow), ASSET_ID, true);
     }
 
     function testUnauthorizedCreationRejected() public {
@@ -200,6 +229,87 @@ contract OfferingManagerTest is Test {
         manager.openOffering(offeringId);
     }
 
+    function testSuccessfulOpenMintsExactSupplyIntoAllocationEscrow() public {
+        bytes32 offeringId = _createOffering();
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        vm.warp(offering.config.opensAt);
+
+        vm.prank(operator);
+        manager.openOffering(offeringId);
+
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Open));
+        assertEq(revenueToken.totalSupply(), FINAL_SUPPLY);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), FINAL_SUPPLY);
+        assertTrue(allocationEscrow.depositConfirmed());
+        assertFalse(revenueToken.hasRole(revenueToken.MINTER_ROLE(), address(manager)));
+    }
+
+    function testMintFailureRollsBackEntireOpen() public {
+        bytes32 offeringId = _createOffering();
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        investorEligibility.setEligible(address(allocationEscrow), ASSET_ID, false);
+        vm.warp(offering.config.opensAt);
+
+        vm.prank(operator);
+        vm.expectRevert();
+        manager.openOffering(offeringId);
+
+        _assertOpenRolledBack(offeringId);
+    }
+
+    function testEscrowFailureRollsBackMintAndBindings() public {
+        bytes32 offeringId = _createOffering();
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        allocationEscrow.setConfirmationFailure(true);
+        vm.warp(offering.config.opensAt);
+
+        vm.prank(operator);
+        vm.expectRevert(AllocationEscrowMock.ConfirmationFailed.selector);
+        manager.openOffering(offeringId);
+
+        _assertOpenRolledBack(offeringId);
+        assertEq(address(revenueToken.revenueVault()), address(0));
+        assertEq(address(revenueToken.recoveryManager()), address(0));
+    }
+
+    function testEscrowCustodyConfirmationInvariantEnforced() public {
+        bytes32 offeringId = _createOffering();
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        allocationEscrow.setRefuseConfirmation(true);
+        vm.warp(offering.config.opensAt);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(OfferingManager.EscrowCustodyNotConfirmed.selector, offeringId));
+        manager.openOffering(offeringId);
+
+        _assertOpenRolledBack(offeringId);
+    }
+
+    function testVaultDependencyFailureRollsBackEntireOpen() public {
+        bytes32 offeringId = _createOffering();
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        revenueVault.setCheckpointFailure(true);
+        vm.warp(offering.config.opensAt);
+
+        vm.prank(operator);
+        vm.expectRevert(OfferingRevenueVaultMock.CheckpointFailed.selector);
+        manager.openOffering(offeringId);
+
+        _assertOpenRolledBack(offeringId);
+    }
+
+    function testSupplyInvariantRemainsExactAfterOpen() public {
+        bytes32 offeringId = _createOffering();
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        vm.warp(offering.config.opensAt);
+
+        vm.prank(operator);
+        manager.openOffering(offeringId);
+
+        assertEq(revenueToken.totalSupply(), revenueToken.finalSupply());
+        assertEq(revenueToken.totalSupply(), manager.getOffering(offeringId).config.finalSupply);
+    }
+
     function testOpenRevalidatesAssetOwnership() public {
         bytes32 offeringId = _createOffering();
         OfferingManager.Offering memory offering = manager.getOffering(offeringId);
@@ -213,6 +323,19 @@ contract OfferingManagerTest is Test {
         assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Draft));
     }
 
+    function testOpenRevalidatesAssetOwnerIdentity() public {
+        bytes32 offeringId = _createOffering();
+        OfferingManager.Offering memory offering = manager.getOffering(offeringId);
+        identityRegistry.setAssetOwner(assetOwner, false);
+        vm.warp(offering.config.opensAt);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(OfferingManager.AssetOwnerIdentityInvalid.selector, assetOwner));
+        manager.openOffering(offeringId);
+
+        _assertOpenRolledBack(offeringId);
+    }
+
     function testOpenRevalidatesIssuer() public {
         bytes32 offeringId = _createOffering();
         OfferingManager.Offering memory offering = manager.getOffering(offeringId);
@@ -222,6 +345,38 @@ contract OfferingManagerTest is Test {
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(OfferingManager.InvalidIssuer.selector, issuer));
         manager.openOffering(offeringId);
+    }
+
+    function testOpenCannotBypassTokenController() public {
+        LicenseRevenueToken foreignControlledToken = new LicenseRevenueToken(
+            "Foreign Controlled Revenue",
+            "FCREV",
+            address(assetRegistry),
+            ASSET_ID,
+            FINAL_SUPPLY,
+            address(investorEligibility),
+            outsider
+        );
+        OfferingRevenueVaultMock foreignVault = new OfferingRevenueVaultMock(address(foreignControlledToken));
+        OfferingManager.OfferingConfig memory config = _validConfig();
+        config.revenueToken = address(foreignControlledToken);
+        config.revenueVault = address(foreignVault);
+
+        vm.prank(assetOwner);
+        bytes32 offeringId = manager.createOffering(config);
+        vm.warp(config.opensAt);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OfferingManager.OfferingManagerNotTokenController.selector, address(foreignControlledToken)
+            )
+        );
+        manager.openOffering(offeringId);
+
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Draft));
+        assertEq(foreignControlledToken.totalSupply(), 0);
+        assertEq(uint256(foreignControlledToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Created));
     }
 
     function testCannotOpenBeforeWindow() public {
@@ -241,6 +396,14 @@ contract OfferingManagerTest is Test {
         OfferingManager.OfferingConfig memory config = _validConfig();
         vm.prank(assetOwner);
         offeringId = manager.createOffering(config);
+    }
+
+    function _assertOpenRolledBack(bytes32 offeringId) private view {
+        assertEq(uint256(manager.getOfferingStatus(offeringId)), uint256(OfferingManager.OfferingStatus.Draft));
+        assertEq(uint256(revenueToken.lifecycle()), uint256(LicenseRevenueToken.Lifecycle.Created));
+        assertEq(revenueToken.totalSupply(), 0);
+        assertEq(revenueToken.balanceOf(address(allocationEscrow)), 0);
+        assertFalse(revenueToken.hasRole(revenueToken.MINTER_ROLE(), address(manager)));
     }
 
     function _validConfig() private view returns (OfferingManager.OfferingConfig memory config) {
@@ -335,6 +498,89 @@ contract SixDecimalUSDCMock is ERC20 {
 
     function decimals() public pure override returns (uint8) {
         return 6;
+    }
+}
+
+contract OfferingInvestorEligibilityMock is IInvestorEligibility {
+    mapping(uint256 assetId => mapping(address account => bool eligible)) private _eligibility;
+
+    function setEligible(address account, uint256 assetId, bool eligible) external {
+        _eligibility[assetId][account] = eligible;
+    }
+
+    function canHold(address account, uint256 assetId) external view returns (bool) {
+        return _eligibility[assetId][account];
+    }
+}
+
+contract OfferingRevenueVaultMock is IRevenueVault {
+    IERC20 public immutable revenueToken;
+    bool private _checkpointFailure;
+
+    error UnauthorizedToken();
+    error CheckpointFailed();
+
+    constructor(address revenueToken_) {
+        revenueToken = IERC20(revenueToken_);
+    }
+
+    function setCheckpointFailure(bool shouldFail) external {
+        _checkpointFailure = shouldFail;
+    }
+
+    function checkpointTransfer(address, address, uint256) external view {
+        if (msg.sender != address(revenueToken)) revert UnauthorizedToken();
+        if (_checkpointFailure) revert CheckpointFailed();
+    }
+
+    function checkpointRecovery(address, address, uint256) external view {
+        if (msg.sender != address(revenueToken)) revert UnauthorizedToken();
+    }
+}
+
+contract OfferingRecoveryManagerMock is IRecoveryManager {
+    function isExecutionAuthorized(bytes32, address, address, address) external pure returns (bool) {
+        return false;
+    }
+}
+
+contract AllocationEscrowMock is IAllocationEscrow {
+    address public immutable offeringManager;
+    bytes32 public immutable offeringId;
+    address public immutable revenueToken;
+    uint256 public immutable finalSupply;
+    bool public depositConfirmed;
+    bool private _confirmationFailure;
+    bool private _refuseConfirmation;
+
+    error UnauthorizedManager();
+    error ConfirmationFailed();
+    error IncorrectCustody(uint256 expected, uint256 actual);
+
+    constructor(address offeringManager_, bytes32 offeringId_, address revenueToken_, uint256 finalSupply_) {
+        offeringManager = offeringManager_;
+        offeringId = offeringId_;
+        revenueToken = revenueToken_;
+        finalSupply = finalSupply_;
+    }
+
+    function setConfirmationFailure(bool shouldFail) external {
+        _confirmationFailure = shouldFail;
+    }
+
+    function setRefuseConfirmation(bool shouldRefuse) external {
+        _refuseConfirmation = shouldRefuse;
+    }
+
+    function confirmTokenDeposit() external {
+        if (msg.sender != offeringManager) revert UnauthorizedManager();
+        if (_confirmationFailure) revert ConfirmationFailed();
+
+        uint256 actual = IERC20(revenueToken).balanceOf(address(this));
+        if (actual != finalSupply) revert IncorrectCustody(finalSupply, actual);
+        if (!_refuseConfirmation) {
+            depositConfirmed = true;
+        }
     }
 }
 
