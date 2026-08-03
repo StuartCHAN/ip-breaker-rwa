@@ -3,7 +3,7 @@
 This index organizes the repository's design records as a traceable engineering narrative:
 
 ```text
-Research and problem definition
+Research and comparative project landscape
         ↓
 Identity and licensing foundation
         ↓
@@ -18,13 +18,14 @@ Security hardening
 Executable deployment and verification
 ```
 
-The documents are not marketing summaries. They record design boundaries, rejected alternatives, state-machine decisions, economic invariants, security findings, and implementation constraints. Historical documents should be read in phase order because later phases may implement or refine decisions recorded earlier.
+The documents are not marketing summaries. They record comparative project lessons, design boundaries, rejected alternatives, state-machine decisions, economic invariants, security findings, implementation constraints, and unresolved off-chain trust assumptions. Historical design records should be read in phase order because later phases may implement or refine decisions recorded earlier.
 
 ## Start here
 
 | Resource | Purpose |
 | --- | --- |
-| [Research paper on Zenodo](https://zenodo.org/records/21335130) | Public research foundation covering IP-RWA analogues, royalty products, programmable-IP protocols, regulated tokenized products, and failed or contracted implementations. |
+| [Research paper](https://zenodo.org/records/21335130?preview_file=patent_rwa_arxiv_v02.pdf) | Public research foundation covering IP-RWA analogues, royalty products, programmable-IP protocols, regulated tokenized products, and failed or contracted implementations. |
+| [Existing IP-RWA Landscape and Product Roadmap](./Existing-IP-RWA-Landscape-and-Product-Roadmap.md) | Compares registry, IP-NFT, programmable-IP, royalty, securities, and regulated-product models; positions IP Breaker RWA between infrastructure and cash-flow products; and sets out the recommended development sequence. |
 | [Research-to-Protocol Mapping](./Research-to-Protocol-Mapping.md) | Connects research conclusions to specific contracts, protocol mechanisms, and design records. |
 | [Phase 2.3 Architecture Freeze](./Phase2.3-Architecture-Freeze.md) | Freezes the identity-aware IP asset, evidence, and licensing baseline before tokenization. |
 | [Phase 3 Revenue Model Design](./Phase3-Revenue-Model-Design.md) | Defines what the Revenue Token represents, what it does not represent, and when a funded claim exists. |
@@ -32,7 +33,34 @@ The documents are not marketing summaries. They record design boundaries, reject
 | [Phase 3.3 Security Hardening Plan](./Phase3.3-Security-Hardening-Plan.md) | Records the settlement-dust DoS, Recovery/Legal-Hold isolation, and EIP-170 deployment blocker. |
 | [`DeployFullProtocol.s.sol`](../script/DeployFullProtocol.s.sol) | Deploys the complete testnet protocol bundle and verifies Draft-offering invariants. |
 
-## 1. Security and licensing foundation
+## 1. Research and market context
+
+### Existing IP-RWA Landscape and Product Roadmap
+
+- [Existing IP-RWA Landscape and Product Roadmap](./Existing-IP-RWA-Landscape-and-Product-Roadmap.md)  
+  Organizes the projects in the paper into two broad routes:
+
+  ```text
+  IP rights registration / licensing infrastructure
+                  versus
+  royalty / receivable financial products
+  ```
+
+  It explains where IP Breaker RWA currently sits between those routes and why the next credible steps are legal-document integration, patent due diligence, verified revenue sources, issuer or SPV responsibility, deadlines, and backup servicing.
+
+### Research-to-Protocol Mapping
+
+- [Research-to-Protocol Mapping](./Research-to-Protocol-Mapping.md)  
+  Translates comparative research conclusions into concrete protocol mechanisms, contracts, tests, and remaining off-chain boundaries.
+
+Together, these two documents answer different questions:
+
+| Document | Main question |
+| --- | --- |
+| Landscape and Product Roadmap | What did existing projects teach us, where does IP Breaker RWA sit, and what should be built next? |
+| Research-to-Protocol Mapping | How were those research conclusions translated into the current Solidity architecture? |
+
+## 2. Security and licensing foundation
 
 ### Phase 1
 
@@ -55,7 +83,7 @@ The documents are not marketing summaries. They record design boundaries, reject
 - [LicenseEscrow State Machine](./Phase2.3-LicenseEscrow-State-Machine.md)  
   Legal transitions and terminal-state restrictions for escrowed licence agreements.
 
-## 2. Revenue-rights and token accounting
+## 3. Revenue-rights and token accounting
 
 - [Phase 3 Revenue Model Design](./Phase3-Revenue-Model-Design.md)  
   Economic rights, funded-revenue boundary, settlement scope, transfer restrictions, and no-yield-guarantee rules.
@@ -70,7 +98,7 @@ The documents are not marketing summaries. They record design boundaries, reject
 - [RecoveryManager Design](./Phase3.1-RecoveryManager-Design.md)  
   EIP-712 consent, role separation, challenge period, nonces, and execution windows.
 
-## 3. Offering and custody architecture
+## 4. Offering and custody architecture
 
 - [Offering Architecture Design](./Phase3.2-Offering-Architecture-Design.md)  
   Overall primary-offering architecture and contract boundaries.
@@ -83,7 +111,7 @@ The documents are not marketing summaries. They record design boundaries, reject
 - [OfferingEscrow Design](./Phase3.2-OfferingEscrow-Design.md)  
   USDC contributions, refunds, issuer proceeds, protocol fees, and pull-payment claims.
 
-## 4. Atomic finalization and Legal-Hold custody
+## 5. Atomic finalization and Legal-Hold custody
 
 - [Atomic Finalization Design](./Phase3.2-Atomic-Finalization-Design.md)  
   Completion equations, dependency postconditions, cash-flow separation, and all-or-nothing activation.
@@ -95,7 +123,7 @@ The implemented Legal-Hold design is also reflected directly in:
 - [`LicenseRevenueToken.sol`](../contracts/LicenseRevenueToken.sol)
 - [`OfferingManager.sol`](../contracts/OfferingManager.sol)
 
-## 5. Security hardening
+## 6. Security hardening
 
 - [Phase 3.3 Security Hardening Plan](./Phase3.3-Security-Hardening-Plan.md)  
   Threat model and remediation plan for three confirmed engineering risks:
@@ -110,18 +138,19 @@ Implemented evidence:
 - [`RevenueVault.Checkpoint.t.sol`](../test/RevenueVault.Checkpoint.t.sol) — transfer and recovery checkpoint behavior.
 - [`LicenseEscrow.Invariant.t.sol`](../test/LicenseEscrow.Invariant.t.sol) — stateful escrow conservation invariants.
 
-## 6. Deployment and executable verification
+## 7. Deployment and executable verification
 
 - [`DeployFullProtocol.s.sol`](../script/DeployFullProtocol.s.sol)  
   Deploys registries, eligibility policies, settlement token, Revenue Program components, RecoveryManager, OfferingManager, Token, Vault, and both Escrows. It precomputes `offeringId`, creates a Draft Offering, and verifies bindings and non-custodial invariants.
 - [`Demo.s.sol`](../script/Demo.s.sol)  
   Earlier IP registration and licensing demonstration.
 - [GitHub Actions workflow](../.github/workflows/test.yml)  
-  Runs formatting, size-aware compilation, full deployment simulation, the Foundry suite, security tests, state-machine tests, and invariants.
+  Runs Mermaid SVG rendering, formatting, size-aware compilation, full deployment simulation, the Foundry suite, security tests, state-machine tests, and invariants.
 
 Current verified baseline at the Phase 3 merge:
 
 ```text
+Mermaid diagrams: 13/13 render successfully
 Full protocol deployment simulation: PASS
 Foundry tests: 406 passed, 0 failed
 OfferingManager runtime: 21,958 bytes
@@ -132,31 +161,34 @@ Invariant suites: PASS
 
 These figures describe the repository's automated test baseline. They are not a substitute for an independent external audit, legal opinion, valuation report, or production readiness assessment.
 
-## 7. Reading paths by audience
+## 8. Reading paths by audience
 
 ### Hackathon reviewer
 
-1. [Research paper](https://zenodo.org/records/21335130)
-2. [Research-to-Protocol Mapping](./Research-to-Protocol-Mapping.md)
-3. [Atomic Finalization Design](./Phase3.2-Atomic-Finalization-Design.md)
-4. [Security Hardening Plan](./Phase3.3-Security-Hardening-Plan.md)
-5. [`DeployFullProtocol.s.sol`](../script/DeployFullProtocol.s.sol)
+1. [Research paper](https://zenodo.org/records/21335130?preview_file=patent_rwa_arxiv_v02.pdf)
+2. [Existing IP-RWA Landscape and Product Roadmap](./Existing-IP-RWA-Landscape-and-Product-Roadmap.md)
+3. [Research-to-Protocol Mapping](./Research-to-Protocol-Mapping.md)
+4. [Atomic Finalization Design](./Phase3.2-Atomic-Finalization-Design.md)
+5. [Security Hardening Plan](./Phase3.3-Security-Hardening-Plan.md)
+6. [`DeployFullProtocol.s.sol`](../script/DeployFullProtocol.s.sol)
 
 ### Solidity engineer
 
-1. [OfferingManager Implementation Design](./Phase3.2-OfferingManager-Implementation-Design.md)
-2. [LicenseRevenueToken Design](./Phase3.1-LicenseRevenueToken-Design.md)
-3. [RevenueVault Design](./Phase3.1-RevenueVault-Design.md)
-4. [Atomic Finalization Design](./Phase3.2-Atomic-Finalization-Design.md)
-5. [Security Hardening Plan](./Phase3.3-Security-Hardening-Plan.md)
+1. [Research-to-Protocol Mapping](./Research-to-Protocol-Mapping.md)
+2. [OfferingManager Implementation Design](./Phase3.2-OfferingManager-Implementation-Design.md)
+3. [LicenseRevenueToken Design](./Phase3.1-LicenseRevenueToken-Design.md)
+4. [RevenueVault Design](./Phase3.1-RevenueVault-Design.md)
+5. [Atomic Finalization Design](./Phase3.2-Atomic-Finalization-Design.md)
+6. [Security Hardening Plan](./Phase3.3-Security-Hardening-Plan.md)
 
 ### RWA, finance, or legal reviewer
 
-1. [Research paper](https://zenodo.org/records/21335130)
-2. [Architecture Freeze](./Phase2.3-Architecture-Freeze.md)
-3. [Revenue Model Design](./Phase3-Revenue-Model-Design.md)
-4. [Permission Matrix](./Phase2.3-Permission-Matrix.md)
-5. [Research-to-Protocol Mapping](./Research-to-Protocol-Mapping.md)
+1. [Research paper](https://zenodo.org/records/21335130?preview_file=patent_rwa_arxiv_v02.pdf)
+2. [Existing IP-RWA Landscape and Product Roadmap](./Existing-IP-RWA-Landscape-and-Product-Roadmap.md)
+3. [Architecture Freeze](./Phase2.3-Architecture-Freeze.md)
+4. [Revenue Model Design](./Phase3-Revenue-Model-Design.md)
+5. [Permission Matrix](./Phase2.3-Permission-Matrix.md)
+6. [Research-to-Protocol Mapping](./Research-to-Protocol-Mapping.md)
 
 ## Scope and trust boundaries
 
