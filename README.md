@@ -2,7 +2,7 @@
 
 ## Compliance-aware IP Revenue Tokenization Infrastructure
 
-[![Research DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21335130.svg)](https://doi.org/10.5281/zenodo.21335130)
+[![Research DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21335130.svg)]([https://doi.org/10.5281/zenodo.21335130](https://zenodo.org/records/21335130?preview_file=patent_rwa_arxiv_v02.pdf))
 
 Transforming verified intellectual-property assets into programmable, transparent, and compliance-aware revenue participation instruments.
 
