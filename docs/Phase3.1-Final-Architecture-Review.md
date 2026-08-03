@@ -30,7 +30,7 @@ flowchart TB
         EP[IInvestorEligibility policy]
         IA -->|revoke / role administration| IR
         IV -->|verify / suspend / restore| IR
-        IR -. identity and ROLE_INVESTOR input expected .-> EP
+        IR -.->|identity and ROLE_INVESTOR input expected| EP
     end
 
     subgraph Asset[IP asset layer]
@@ -51,7 +51,7 @@ flowchart TB
         RA -->|approve| RM
         RG -->|challenge| RM
         RE -->|authorizeExecution| RM
-        IR -. not directly queried in Phase 3.1 .-> RM
+        IR -.->|not directly queried in Phase 3.1| RM
     end
 
     subgraph RevenueProgram[One asset-level revenue program]
