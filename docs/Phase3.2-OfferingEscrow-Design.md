@@ -115,10 +115,10 @@ sequenceDiagram
 
     I->>U: approve(Escrow, maxUSDC)
     I->>M: subscribe(requestedUnits, minFill, maxUSDC, destination, references)
-    M->>M: validate identity, time, capacity; compute filled and usdcCost
+    M->>M: validate identity, time and capacity, then compute filled and usdcCost
     M->>E: collectContribution(exact subscription tuple)
     E->>U: transferFrom(investor, Escrow, usdcCost)
-    E->>E: verify exact balance delta; record funded contribution
+    E->>E: verify exact balance delta, then record funded contribution
     M->>M: record commitment and aggregate totals
     M->>A: registerAllocation(exact filled units)
     M-->>I: SubscriptionAccepted

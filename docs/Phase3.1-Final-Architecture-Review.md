@@ -118,11 +118,11 @@ sequenceDiagram
     T->>P: canHold(destination, assetId)
     T->>T: read complete nonzero source balance
     T->>V: checkpointRecovery(source, destination, full balance)
-    V->>V: accrue both; migrate pending; rewrite debt; check solvency
+    V->>V: accrue both, migrate pending, rewrite debt, check solvency
     V-->>T: RevenueStateMigrated
     T->>T: ERC-20 _update(source, destination, full balance)
     T-->>M: RecoveryMigrationExecuted
-    M->>M: status = Executed; clear active request
+    M->>M: status = Executed, clear active request
 ```
 
 Every call in the recovery sequence is part of one transaction. A revert at any point restores Manager status, Token balances and replay state, and Vault accounting.
