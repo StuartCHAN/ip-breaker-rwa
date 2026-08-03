@@ -2,7 +2,7 @@
 
 ## Compliance-aware IP Revenue Tokenization Infrastructure
 
-[![Research DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21335130.svg)]([https://doi.org/10.5281/zenodo.21335130](https://zenodo.org/records/21335130?preview_file=patent_rwa_arxiv_v02.pdf))
+[![Research DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21335130.svg)](https://zenodo.org/records/21335130?preview_file=patent_rwa_arxiv_v02.pdf)
 
 Transforming verified intellectual-property assets into programmable, transparent, and compliance-aware revenue participation instruments.
 
@@ -70,7 +70,7 @@ The engineering translation is visible throughout the repository:
 
 ### Explore the evidence
 
-- **[Read the research paper on Zenodo](https://zenodo.org/records/21335130)**
+- **[Read the research paper](https://zenodo.org/records/21335130?preview_file=patent_rwa_arxiv_v02.pdf)**
 - **[Explore the full documentation index](docs/Documentation-Index.md)**
 - **[See the research-to-protocol mapping](docs/Research-to-Protocol-Mapping.md)**
 - **[Review the security hardening journey](docs/Phase3.3-Security-Hardening-Plan.md)**
@@ -295,7 +295,7 @@ The testnet deployment uses demo eligibility modules and a mock six-decimal USDC
 
 For a five-minute review, start with these six resources:
 
-1. **[Research paper on Zenodo](https://zenodo.org/records/21335130)** — comparative IP-RWA research and product lessons.
+1. **[Research paper](https://zenodo.org/records/21335130?preview_file=patent_rwa_arxiv_v02.pdf)** — comparative IP-RWA research and product lessons.
 2. **[Phase 2.3 Architecture Freeze](docs/Phase2.3-Architecture-Freeze.md)** — IP, identity, evidence, and licensing boundary before tokenization.
 3. **[Phase 3 Revenue Model Design](docs/Phase3-Revenue-Model-Design.md)** — what the Token represents and explicitly does not represent.
 4. **[Phase 3.2 Atomic Finalization Design](docs/Phase3.2-Atomic-Finalization-Design.md)** — cross-contract activation, custody completion, and cash-flow isolation.
