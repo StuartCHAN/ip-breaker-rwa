@@ -30,7 +30,7 @@ flowchart TB
         EP[IInvestorEligibility policy]
         IA -->|revoke / role administration| IR
         IV -->|verify / suspend / restore| IR
-        IR -. identity and ROLE_INVESTOR input expected .-> EP
+        IR -.->|identity and ROLE_INVESTOR input expected| EP
     end
 
     subgraph Asset[IP asset layer]
@@ -51,7 +51,7 @@ flowchart TB
         RA -->|approve| RM
         RG -->|challenge| RM
         RE -->|authorizeExecution| RM
-        IR -. not directly queried in Phase 3.1 .-> RM
+        IR -.->|not directly queried in Phase 3.1| RM
     end
 
     subgraph RevenueProgram[One asset-level revenue program]
@@ -118,11 +118,11 @@ sequenceDiagram
     T->>P: canHold(destination, assetId)
     T->>T: read complete nonzero source balance
     T->>V: checkpointRecovery(source, destination, full balance)
-    V->>V: accrue both; migrate pending; rewrite debt; check solvency
+    V->>V: accrue both, migrate pending, rewrite debt, check solvency
     V-->>T: RevenueStateMigrated
     T->>T: ERC-20 _update(source, destination, full balance)
     T-->>M: RecoveryMigrationExecuted
-    M->>M: status = Executed; clear active request
+    M->>M: status = Executed, clear active request
 ```
 
 Every call in the recovery sequence is part of one transaction. A revert at any point restores Manager status, Token balances and replay state, and Vault accounting.

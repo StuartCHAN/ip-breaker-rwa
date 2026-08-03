@@ -20,6 +20,16 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      - name: Set up Node.js for documentation checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate Mermaid diagrams by rendering SVG
+        run: |
+          npm install --no-save --package-lock=false @mermaid-js/mermaid-cli@11.12.0
+          node scripts/validate-mermaid.mjs
+
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
@@ -33,9 +43,11 @@ jobs:
         run: forge build --sizes
 
       - name: Simulate Full Protocol Deployment
-        env:
-          PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-        run: forge script script/DeployFullProtocol.s.sol:DeployFullProtocol -vvv
+        run: |
+          export PRIVATE_KEY="$(cast wallet private-key \
+            --mnemonic 'test test test test test test test test test test test junk' \
+            --mnemonic-index 0)"
+          forge script script/DeployFullProtocol.s.sol:DeployFullProtocol -vvv
 
       - name: Run All Forge Tests
         run: forge test -vvv
