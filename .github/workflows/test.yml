@@ -20,6 +20,16 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      - name: Set up Node.js for documentation checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate Mermaid diagrams
+        run: |
+          npm install --no-save --ignore-scripts mermaid@11.12.0
+          node scripts/validate-mermaid.mjs
+
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
