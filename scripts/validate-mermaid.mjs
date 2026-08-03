@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 const ROOTS = ["README.md", "docs"];
 const MERMAID_BLOCK = /```mermaid[\t ]*\r?\n([\s\S]*?)```/g;
 const MMDC = path.resolve("node_modules/.bin/mmdc");
+const PUPPETEER_CONFIG = path.resolve("scripts/puppeteer-config.json");
 
 async function collectMarkdownFiles(target) {
   const metadata = await stat(target);
@@ -43,10 +44,14 @@ try {
       const output = path.join(workdir, `${basename}.svg`);
 
       await writeFile(input, `${diagram}\n`, "utf8");
-      const result = spawnSync(MMDC, ["-i", input, "-o", output], {
-        encoding: "utf8",
-        env: process.env,
-      });
+      const result = spawnSync(
+        MMDC,
+        ["-p", PUPPETEER_CONFIG, "-i", input, "-o", output],
+        {
+          encoding: "utf8",
+          env: process.env,
+        },
+      );
 
       if (result.status === 0) {
         console.log(`PASS ${file}:${startLine} diagram ${index + 1}`);
