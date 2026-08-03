@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
+import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 /// @notice Completeness check for the LicenseAgreement state graph, organized by STARTING
 ///         STATE rather than by function. LicenseEscrowAgreement.t.sol already checks
@@ -42,8 +43,8 @@ contract LicenseEscrowStateMachineTest is Test {
     string private constant TERMS_URI = "ipfs://license-terms-commercial-internal-use";
 
     function setUp() public {
-        assetRegistry = new IPAssetRegistry();
-        licenseEscrow = new LicenseEscrow(address(assetRegistry));
+        assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
+        licenseEscrow = new LicenseEscrow(address(assetRegistry), address(assetRegistry.identityRegistry()));
         licenseEscrow.setArbiter(dave);
 
         vm.deal(bob, 10 ether);

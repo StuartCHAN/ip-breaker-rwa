@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
+import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 contract LicenseEscrowTest is Test {
     IPAssetRegistry private assetRegistry;
@@ -51,8 +52,8 @@ contract LicenseEscrowTest is Test {
     );
 
     function setUp() public {
-        assetRegistry = new IPAssetRegistry();
-        licenseEscrow = new LicenseEscrow(address(assetRegistry));
+        assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
+        licenseEscrow = new LicenseEscrow(address(assetRegistry), address(assetRegistry.identityRegistry()));
 
         vm.deal(bob, 10 ether);
         vm.deal(carol, 10 ether);
@@ -63,8 +64,9 @@ contract LicenseEscrowTest is Test {
     }
 
     function testConstructorRevertsWhenAssetRegistryIsZero() public {
+        address identityRegistry = address(assetRegistry.identityRegistry());
         vm.expectRevert(LicenseEscrow.ZeroAssetRegistry.selector);
-        new LicenseEscrow(address(0));
+        new LicenseEscrow(address(0), identityRegistry);
     }
 
     function testCreateLicenseOfferStoresOffer() public {

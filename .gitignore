@@ -17,3 +17,12 @@ node_modules/
 .next/
 dist/
 build/
+
+# Hand-off
+docs/HANDOFF.md 
+
+# .github
+.github/copilot-instructions.md
+.github/instructions/
+
+

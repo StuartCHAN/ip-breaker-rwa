@@ -7,6 +7,7 @@ import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Recei
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
+import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 /// @notice Covers the escrow + arbitration flow (LicenseAgreement / LicenseStatus)
 ///         added on top of the existing offer/license NFT flow. See LicenseEscrow.t.sol
@@ -52,8 +53,8 @@ contract LicenseEscrowAgreementTest is Test {
     event ArbiterUpdated(address indexed previousArbiter, address indexed newArbiter);
 
     function setUp() public {
-        assetRegistry = new IPAssetRegistry();
-        licenseEscrow = new LicenseEscrow(address(assetRegistry));
+        assetRegistry = new IPAssetRegistry(address(new MockIdentityRegistry()));
+        licenseEscrow = new LicenseEscrow(address(assetRegistry), address(assetRegistry.identityRegistry()));
 
         // Test contract is the deployer -> owner -> default arbiter. Reassign to `dave`
         // so arbitration tests exercise a distinct third party, like a real deployment would.

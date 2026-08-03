@@ -4,9 +4,11 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
+import {IdentityRegistry} from "../contracts/IdentityRegistry.sol";
 
 contract IPAssetRegistryTest is Test {
     IPAssetRegistry private registry;
+    IdentityRegistry private identityRegistry;
 
     address private alice = makeAddr("alice");
     address private bob = makeAddr("bob");
@@ -28,7 +30,21 @@ contract IPAssetRegistryTest is Test {
     );
 
     function setUp() public {
-        registry = new IPAssetRegistry();
+        identityRegistry = new IdentityRegistry();
+        identityRegistry.grantVerifierRole(address(this));
+        registry = new IPAssetRegistry(address(identityRegistry));
+
+        _verifyAssetOwner(alice, 0);
+        _verifyAssetOwner(bob, 0);
+    }
+
+    function testConstructorStoresIdentityRegistry() public view {
+        assertEq(address(registry.identityRegistry()), address(identityRegistry));
+    }
+
+    function testConstructorRevertsWhenIdentityRegistryIsZero() public {
+        vm.expectRevert(IPAssetRegistry.ZeroIdentityRegistry.selector);
+        new IPAssetRegistry(address(0));
     }
 
     function testRegisterAssetMintsNFTToCaller() public {
@@ -98,6 +114,43 @@ contract IPAssetRegistryTest is Test {
         registry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
     }
 
+    function testRegisterAssetRevertsForUnregisteredCaller() public {
+        address unregistered = makeAddr("unregistered");
+
+        vm.expectRevert(abi.encodeWithSelector(IPAssetRegistry.NotVerifiedAssetOwner.selector, unregistered));
+        vm.prank(unregistered);
+        registry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
+    }
+
+    function testRegisterAssetRevertsForVerifiedCallerWithoutAssetOwnerRole() public {
+        address licensee = makeAddr("licensee");
+        _verifyIdentity(licensee, identityRegistry.ROLE_LICENSEE(), 0);
+
+        vm.expectRevert(abi.encodeWithSelector(IPAssetRegistry.NotVerifiedAssetOwner.selector, licensee));
+        vm.prank(licensee);
+        registry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
+    }
+
+    function testRegisterAssetRevertsForSuspendedAssetOwner() public {
+        vm.prank(address(this));
+        identityRegistry.suspendIdentity(alice, "under review");
+
+        vm.expectRevert(abi.encodeWithSelector(IPAssetRegistry.NotVerifiedAssetOwner.selector, alice));
+        vm.prank(alice);
+        registry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
+    }
+
+    function testRegisterAssetRevertsForExpiredAssetOwner() public {
+        address expiredOwner = makeAddr("expiredOwner");
+        uint64 expiresAt = uint64(block.timestamp + 30 days);
+        _verifyAssetOwner(expiredOwner, expiresAt);
+        vm.warp(expiresAt);
+
+        vm.expectRevert(abi.encodeWithSelector(IPAssetRegistry.NotVerifiedAssetOwner.selector, expiredOwner));
+        vm.prank(expiredOwner);
+        registry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
+    }
+
     function testRegisterAssetRevertsWhenTitleIsEmpty() public {
         vm.expectRevert(IPAssetRegistry.EmptyTitle.selector);
 
@@ -136,5 +189,15 @@ contract IPAssetRegistryTest is Test {
     function _registerDefaultAsset(address registrant) private returns (uint256 assetId) {
         vm.prank(registrant);
         assetId = registry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
+    }
+
+    function _verifyAssetOwner(address account, uint64 expiresAt) private {
+        _verifyIdentity(account, identityRegistry.ROLE_ASSET_OWNER(), expiresAt);
+    }
+
+    function _verifyIdentity(address account, uint256 roles, uint64 expiresAt) private {
+        vm.prank(account);
+        identityRegistry.registerIdentity("ipfs://encrypted-kyc", roles);
+        identityRegistry.verifyIdentity(account, roles, expiresAt);
     }
 }

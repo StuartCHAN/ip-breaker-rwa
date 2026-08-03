@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Script, console2} from "forge-std/Script.sol";
 
 import {IPAssetRegistry} from "../contracts/IPAssetRegistry.sol";
+import {IdentityRegistry} from "../contracts/IdentityRegistry.sol";
 import {EvidenceRegistry} from "../contracts/EvidenceRegistry.sol";
 import {LicenseEscrow} from "../contracts/LicenseEscrow.sol";
 
@@ -52,6 +53,8 @@ contract Demo is Script {
         address reviewer = vm.addr(reviewerPrivateKey);
         address bob = vm.addr(bobPrivateKey);
 
+        IdentityRegistry identityRegistry = IdentityRegistry(vm.envAddress("IDENTITY_REGISTRY"));
+
         IPAssetRegistry assetRegistry = IPAssetRegistry(vm.envAddress("IP_ASSET_REGISTRY"));
 
         EvidenceRegistry evidenceRegistry = EvidenceRegistry(vm.envAddress("EVIDENCE_REGISTRY"));
@@ -63,20 +66,35 @@ contract Demo is Script {
         console2.log("Alice / IP owner:", alice);
         console2.log("Reviewer:", reviewer);
         console2.log("Bob / license buyer:", bob);
+        console2.log("IdentityRegistry:", address(identityRegistry));
         console2.log("IPAssetRegistry:", address(assetRegistry));
         console2.log("EvidenceRegistry:", address(evidenceRegistry));
         console2.log("LicenseEscrow:", address(licenseEscrow));
 
-        // 1. Admin approves reviewer.
-        vm.startBroadcast(adminPrivateKey);
+        // 1. Alice and the reviewer apply for their business roles.
+        vm.startBroadcast(alicePrivateKey);
 
-        evidenceRegistry.setReviewer(reviewer, true);
+        identityRegistry.registerIdentity("ipfs://encrypted-alice-kyc", identityRegistry.ROLE_ASSET_OWNER());
 
         vm.stopBroadcast();
 
-        console2.log("Reviewer approved");
+        vm.startBroadcast(reviewerPrivateKey);
 
-        // 2. Alice registers an IP asset.
+        identityRegistry.registerIdentity("ipfs://encrypted-reviewer-credentials", identityRegistry.ROLE_VERIFIER());
+
+        vm.stopBroadcast();
+
+        // 2. Admin verifies Alice and the reviewer.
+        vm.startBroadcast(adminPrivateKey);
+
+        identityRegistry.verifyIdentity(alice, identityRegistry.ROLE_ASSET_OWNER(), 0);
+        identityRegistry.verifyIdentity(reviewer, identityRegistry.ROLE_VERIFIER(), 0);
+
+        vm.stopBroadcast();
+
+        console2.log("Alice and reviewer identities verified");
+
+        // 3. Alice registers an IP asset.
         vm.startBroadcast(alicePrivateKey);
 
         uint256 assetId = assetRegistry.registerAsset(TITLE, ASSET_TYPE, JURISDICTION, DOCUMENT_HASH, METADATA_URI);
@@ -84,7 +102,7 @@ contract Demo is Script {
         console2.log("IP Asset registered");
         console2.log("assetId:", assetId);
 
-        // 3. Alice adds ordinary technical evidence: GitHub commit proof.
+        // 4. Alice adds ordinary technical evidence: GitHub commit proof.
         uint256 githubEvidenceId =
             evidenceRegistry.addEvidence(assetId, GITHUB_COMMIT, GITHUB_EVIDENCE_HASH, GITHUB_EVIDENCE_URI, bytes32(0));
 
@@ -93,18 +111,28 @@ contract Demo is Script {
 
         vm.stopBroadcast();
 
-        // 4. Reviewer adds due-diligence evidence: FTO report.
-        vm.startBroadcast(reviewerPrivateKey);
+        // 5. Alice submits a due-diligence evidence candidate: FTO report.
+        vm.startBroadcast(alicePrivateKey);
 
         uint256 ftoEvidenceId =
             evidenceRegistry.addEvidence(assetId, FTO_REPORT, FTO_REPORT_HASH, FTO_REPORT_URI, FTO_ATTESTATION_UID);
 
         vm.stopBroadcast();
 
-        console2.log("FTO report evidence added");
+        console2.log("FTO report evidence submitted");
         console2.log("ftoEvidenceId:", ftoEvidenceId);
 
-        // 5. Alice creates a non-transferable commercial license offer.
+        // 6. The verified reviewer approves both evidence records.
+        vm.startBroadcast(reviewerPrivateKey);
+
+        evidenceRegistry.verifyEvidence(githubEvidenceId);
+        evidenceRegistry.verifyEvidence(ftoEvidenceId);
+
+        vm.stopBroadcast();
+
+        console2.log("Evidence records verified");
+
+        // 7. Alice creates a non-transferable commercial license offer.
         vm.startBroadcast(alicePrivateKey);
 
         uint256 offerId =
@@ -117,7 +145,7 @@ contract Demo is Script {
         console2.log("license price:", LICENSE_PRICE);
         console2.log("transferable: false");
 
-        // 6. Bob buys the license and receives a License Certificate NFT.
+        // 8. Bob buys the license and receives a License Certificate NFT.
         vm.startBroadcast(bobPrivateKey);
 
         uint256 licenseId = licenseEscrow.buyLicense{value: LICENSE_PRICE}(offerId);
