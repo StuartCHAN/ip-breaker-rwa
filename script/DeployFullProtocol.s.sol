@@ -151,25 +151,24 @@ contract DeployFullProtocol is Script {
         deployment.licenseEscrow =
             new LicenseEscrow(address(deployment.assetRegistry), address(deployment.identityRegistry));
 
-        deployment.assetId = deployment.assetRegistry.registerAsset(
-            "IP Breaker RWA Demonstration Asset",
-            "SOFTWARE_IP",
-            "GLOBAL",
-            keccak256(bytes("IP Breaker RWA demonstration asset document v1")),
-            "ipfs://ip-breaker/demo-asset-metadata"
-        );
+        deployment.assetId = deployment.assetRegistry
+            .registerAsset(
+                "IP Breaker RWA Demonstration Asset",
+                "SOFTWARE_IP",
+                "GLOBAL",
+                keccak256(bytes("IP Breaker RWA demonstration asset document v1")),
+                "ipfs://ip-breaker/demo-asset-metadata"
+            );
 
         deployment.issuerEligibility = new DemoIssuerEligibility(deployer);
         deployment.issuerEligibility.setEligibleIssuer(deployer, true);
 
-        deployment.investorEligibility =
-            new DemoInvestorEligibility(address(deployment.identityRegistry), deployer);
+        deployment.investorEligibility = new DemoInvestorEligibility(address(deployment.identityRegistry), deployer);
         deployment.investorEligibility.setInvestorEligible(deployment.assetId, deployer, true);
 
         deployment.settlementToken = new DemoUSDC6(deployer);
         deployment.programRegistry = new RevenueProgramRegistry(deployer);
-        deployment.recoveryManager =
-            new RecoveryManager(deployer, RECOVERY_CHALLENGE_PERIOD, RECOVERY_EXECUTION_WINDOW);
+        deployment.recoveryManager = new RecoveryManager(deployer, RECOVERY_CHALLENGE_PERIOD, RECOVERY_EXECUTION_WINDOW);
 
         deployment.offeringManager = new OfferingManager(
             deployer,
@@ -179,9 +178,8 @@ contract DeployFullProtocol is Script {
             address(deployment.programRegistry)
         );
 
-        deployment.programRegistry.grantRole(
-            deployment.programRegistry.PROGRAM_MANAGER_ROLE(), address(deployment.offeringManager)
-        );
+        deployment.programRegistry
+            .grantRole(deployment.programRegistry.PROGRAM_MANAGER_ROLE(), address(deployment.offeringManager));
         deployment.offeringManager.grantRole(deployment.offeringManager.OFFERING_OPERATOR_ROLE(), deployer);
 
         deployment.recoveryManager.grantRole(deployment.recoveryManager.RECOVERY_REQUESTER_ROLE(), deployer);
@@ -191,10 +189,7 @@ contract DeployFullProtocol is Script {
         deployment.recoveryManager.grantRole(deployment.recoveryManager.RECOVERY_GUARDIAN_ROLE(), deployer);
     }
 
-    function _deployOfferingBundle(Deployment memory deployment, address deployer)
-        private
-        returns (Deployment memory)
-    {
+    function _deployOfferingBundle(Deployment memory deployment, address deployer) private returns (Deployment memory) {
         bytes32 termsHash = keccak256(bytes("IP Breaker RWA offering terms v1"));
         bytes32 disclosureHash = keccak256(bytes("IP Breaker RWA risk disclosure v1"));
         uint256 creatorNonce = deployment.offeringManager.creatorNonce(deployer);
@@ -282,36 +277,22 @@ contract DeployFullProtocol is Script {
         bytes32 termsHash
     ) private view returns (bytes32) {
         return keccak256(
-            abi.encode(
-                block.chainid,
-                offeringManager,
-                assetRegistry,
-                assetId,
-                creator,
-                issuer,
-                creatorNonce,
-                termsHash
-            )
+            abi.encode(block.chainid, offeringManager, assetRegistry, assetId, creator, issuer, creatorNonce, termsHash)
         );
     }
 
     function _verifyDeployment(Deployment memory deployment, address deployer) private view {
         require(deployment.assetRegistry.ownerOf(deployment.assetId) == deployer, "asset owner mismatch");
         require(
-            deployment.identityRegistry.hasBusinessRole(
-                deployer, deployment.identityRegistry.ROLE_ASSET_OWNER()
-            ),
+            deployment.identityRegistry.hasBusinessRole(deployer, deployment.identityRegistry.ROLE_ASSET_OWNER()),
             "asset-owner identity missing"
         );
         require(deployment.issuerEligibility.isEligibleIssuer(deployer), "issuer not eligible");
-        require(
-            deployment.investorEligibility.canHold(deployer, deployment.assetId), "investor not eligible"
-        );
+        require(deployment.investorEligibility.canHold(deployer, deployment.assetId), "investor not eligible");
 
         require(
-            deployment.programRegistry.hasRole(
-                deployment.programRegistry.PROGRAM_MANAGER_ROLE(), address(deployment.offeringManager)
-            ),
+            deployment.programRegistry
+                .hasRole(deployment.programRegistry.PROGRAM_MANAGER_ROLE(), address(deployment.offeringManager)),
             "program-manager role missing"
         );
         require(
@@ -319,15 +300,13 @@ contract DeployFullProtocol is Script {
             "offering-operator role missing"
         );
         require(
-            deployment.revenueToken.hasRole(
-                deployment.revenueToken.TOKEN_CONTROLLER_ROLE(), address(deployment.offeringManager)
-            ),
+            deployment.revenueToken
+                .hasRole(deployment.revenueToken.TOKEN_CONTROLLER_ROLE(), address(deployment.offeringManager)),
             "token-controller role missing"
         );
 
         require(
-            deployment.offeringManager.getOfferingStatus(deployment.offeringId)
-                == OfferingManager.OfferingStatus.Draft,
+            deployment.offeringManager.getOfferingStatus(deployment.offeringId) == OfferingManager.OfferingStatus.Draft,
             "offering is not draft"
         );
         require(
@@ -336,25 +315,21 @@ contract DeployFullProtocol is Script {
         );
         IRevenueProgramRegistry.RevenueProgram memory program =
             deployment.programRegistry.getProgram(deployment.offeringId);
-        require(
-            program.status == IRevenueProgramRegistry.ProgramStatus.Reserved, "program is not reserved"
-        );
+        require(program.status == IRevenueProgramRegistry.ProgramStatus.Reserved, "program is not reserved");
 
         require(
             deployment.revenueVault.activationController() == address(deployment.offeringManager),
             "vault activation controller mismatch"
         );
         require(
-            address(deployment.revenueVault.revenueToken()) == address(deployment.revenueToken),
-            "vault token mismatch"
+            address(deployment.revenueVault.revenueToken()) == address(deployment.revenueToken), "vault token mismatch"
         );
         require(
             deployment.allocationEscrow.offeringManager() == address(deployment.offeringManager),
             "allocation escrow manager mismatch"
         );
         require(
-            deployment.allocationEscrow.offeringId() == deployment.offeringId,
-            "allocation escrow offering mismatch"
+            deployment.allocationEscrow.offeringId() == deployment.offeringId, "allocation escrow offering mismatch"
         );
         require(
             deployment.allocationEscrow.revenueToken() == address(deployment.revenueToken),
@@ -365,23 +340,16 @@ contract DeployFullProtocol is Script {
             deployment.offeringEscrow.offeringManager() == address(deployment.offeringManager),
             "offering escrow manager mismatch"
         );
-        require(
-            deployment.offeringEscrow.offeringId() == deployment.offeringId,
-            "offering escrow offering mismatch"
-        );
+        require(deployment.offeringEscrow.offeringId() == deployment.offeringId, "offering escrow offering mismatch");
         require(
             deployment.offeringEscrow.settlementToken() == address(deployment.settlementToken),
             "offering escrow settlement mismatch"
         );
 
         require(address(deployment.revenueToken.revenueVault()) == address(0), "token vault bound too early");
+        require(address(deployment.revenueToken.recoveryManager()) == address(0), "recovery manager bound too early");
         require(
-            address(deployment.revenueToken.recoveryManager()) == address(0),
-            "recovery manager bound too early"
-        );
-        require(
-            deployment.revenueToken.primaryDistributionEscrow() == address(0),
-            "distribution escrow bound too early"
+            deployment.revenueToken.primaryDistributionEscrow() == address(0), "distribution escrow bound too early"
         );
         require(deployment.revenueToken.totalSupply() == 0, "token supply created too early");
         require(!deployment.allocationEscrow.depositConfirmed(), "token deposit confirmed too early");
@@ -391,8 +359,7 @@ contract DeployFullProtocol is Script {
             "manager holds settlement token"
         );
         require(
-            deployment.revenueToken.balanceOf(address(deployment.offeringManager)) == 0,
-            "manager holds revenue token"
+            deployment.revenueToken.balanceOf(address(deployment.offeringManager)) == 0, "manager holds revenue token"
         );
     }
 
